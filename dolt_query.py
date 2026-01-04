@@ -14,6 +14,13 @@ conn = cnc.connect(host = "127.0.0.1",
                    password = "", 
                    database = "earnings")
 
+#get the names of the tables in the database
+cursor = conn.cursor(buffered = True)
+cursor.execute("SHOW TABLES;")
+tables = cursor.fetchall()
+print([table[0] for table in tables])
+cursor.close()
+
 #query for getting the 1st 5 entries of Ford from balance_sheet_assets
 query = """
 SELECT *
