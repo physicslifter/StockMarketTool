@@ -5,7 +5,7 @@ from scipy.stats import norm, t
 import numpy as np
 from pdb import set_trace as st
 from sim_strat1 import StockData
-plt.style.use('fivethirtyeight')
+plt.style.use('dark_background')
 from Analysis import *
 
 
@@ -18,7 +18,8 @@ test_baseline_compare = 0
 compare_beverage_stocks = 0
 test_show_portfolio_mix = 0
 test_portfolio_performance_against_mean = 0
-compare_pharma = 1
+compare_pharma = 0
+test_read_dolt_data = 1
 
 stock = "F"
 if stock in ["SPY"]:
@@ -190,10 +191,11 @@ if test_portfolio_performance_against_mean == True:
 if compare_pharma == True:
     fig = plt.figure(figsize = (8, 5))
     ax = fig.add_subplot(1, 1, 1)
-    ax.set_xlabel("Date")
-    ax.set_ylabel("Return")
-    ax.set_title("Pharma perf against avg")
-    stocks = ["PFE", "MRK", "RHHBY", "JNJ", "AZNCF", "NVS"]
+    #ax.set_xlabel("Date")
+    #ax.set_ylabel("Return")
+    #ax.set_title("Pharma perf against avg")
+    #stocks = ["PFE", "MRK", "RHHBY", "JNJ", "AZNCF", "NVS"]
+    stocks = ["PFE", "NVS"]
     portfolio = Portfolio(stocks)
     start_date = np.datetime64("2022-06-01", "D")
     end_date = np.datetime64("2025-12-10", "D")
@@ -207,7 +209,11 @@ if compare_pharma == True:
         "AZNCF": 0.1667,
         "NVS": 0.1667
     }
+    mix = {"PFE":0.5, "NVS":0.5}
+    colors = [""]
     portfolio.show_performance_wrt_mean(ax = ax)
-    ax.legend()
+    ax.legend(fontsize = "x-large")
+    ax.set_xticks([])
+    ax.set_yticks([])
     plt.tight_layout()
     plt.show()
