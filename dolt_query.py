@@ -6,6 +6,7 @@ use dolt to start the server in Desktop/Work/Dolt before running script
 
 from mysql import connector as cnc
 import pandas as pd
+from pdb import set_trace as st
 
 #get connection
 conn = cnc.connect(host = "127.0.0.1", 
@@ -26,8 +27,15 @@ query = """
 SELECT *
 FROM balance_sheet_assets
 WHERE act_symbol = 'F'
-LIMIT 5;
+    AND date > '2015-01-01'
+        AND date < '2019-03-14'
+            AND period = "Quarter";
+LIMIT = 1000;
 """
+
+query = "SELECT * FROM balance_sheet_assets WHERE act_symbol = 'F' AND date > '2015-01-01' AND date < '2019-03-14' AND period = 'Quarter';"
 
 df = pd.read_sql(query, conn)
 print(df.head())
+
+st()
