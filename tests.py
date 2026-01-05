@@ -7,7 +7,7 @@ from pdb import set_trace as st
 from sim_strat1 import StockData
 plt.style.use('dark_background')
 from Analysis import *
-
+from DoltReader import *
 
 show_all_data = 0
 show_daily_changes = 0
@@ -217,3 +217,13 @@ if compare_pharma == True:
     ax.set_yticks([])
     plt.tight_layout()
     plt.show()
+
+if test_read_dolt_data == True:
+    reader = DataReader()
+    data = reader.get_data(database_name = "earnings",
+                    stock = "F",
+                    start_date = np.datetime64("2015-01-01", "D"),
+                    end_date = np.datetime64("2021-03-14", "D"),
+                    report_type = "Quarter",
+                    table_names = None)
+    st()
