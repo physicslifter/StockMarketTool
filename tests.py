@@ -19,7 +19,9 @@ compare_beverage_stocks = 0
 test_show_portfolio_mix = 0
 test_portfolio_performance_against_mean = 0
 compare_pharma = 0
-test_read_dolt_data = 1
+test_read_dolt_data = 0
+test_get_earnings_data = 0
+test_ROIC = 1
 
 stock = "F"
 if stock in ["SPY"]:
@@ -220,10 +222,32 @@ if compare_pharma == True:
 
 if test_read_dolt_data == True:
     reader = DataReader()
+    tables = ["cash_flow_statement", "balance_sheet_liabilities", "balance_sheet_equity", "balance_sheet_assets", "income_statement"]
     data = reader.get_data(database_name = "earnings",
                     stock = "F",
                     start_date = np.datetime64("2015-01-01", "D"),
                     end_date = np.datetime64("2021-03-14", "D"),
                     report_type = "Quarter",
-                    table_names = None)
+                    table_names = tables)
+    for key in data.keys():
+        print(key, len(data[key]))
     st()
+
+if test_get_earnings_data == True:
+    reader = DataReader()
+    data = reader.get_earnings_data("F", "2010-01-01", "2022-03-14", "Quarter")
+    st()
+
+if test_ROIC == True:
+    reader = DataReader()
+    reader.get_earnings_data("F", "2010-01-01", "2022-03-14", "Quarter")
+    ROIC = reader.calc_ROIC()
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("ROIC")
+    ax.plot(pd.to_datetime(reader.earnings_data["income_statement"]["date"]), ROIC)
+    ax.set_title("Quarterly ROIC for F from 2010 to 2022")
+    plt.tight_layout()
+    plt.show()
+
