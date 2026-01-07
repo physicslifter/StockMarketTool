@@ -47,6 +47,10 @@ class DataReader:
 
         return pandas_data
     
+    def check_earnings_data(self):
+        #ensures that earnings data has been retrieved
+        if self.has_earnings_data == False:
+            raise Exception("Earnings data has not yet been retrieved")
 
     def get_earnings_data(self, stock, start_date, end_date, report_type):
         if report_type not in ["Quarter", "Year"]:
@@ -57,7 +61,7 @@ class DataReader:
                            password = "", 
                            database = "earnings")
         cursor = conn.cursor(buffered = True)
-        tables = ["balance_sheet_liabilities", "balance_sheet_equity", "balance_sheet_assets", "income_statement"]
+        tables = ["balance_sheet_liabilities", "balance_sheet_equity", "balance_sheet_assets", "income_statement", "cash_flow_statement"]
         pandas_data = {}
         for table_name in tables:
                 print(table_name)
@@ -70,8 +74,16 @@ class DataReader:
         return pandas_data
     
     def calc_ROIC(self):
-        if self.has_earnings_data == False:
-            raise Exception("No earnings data has been retrieved")
+        self.check_earnings_data()
         invested_capital = self.earnings_data["balance_sheet_assets"]["total_assets"] - self.earnings_data["balance_sheet_liabilities"]["total_liabilities"]
         NOPAT = self.earnings_data["income_statement"]["pretax_income"] - self.earnings_data["income_statement"]["income_taxes"] - self.earnings_data["income_statement"]["non_operating_income"]
         return NOPAT/invested_capital
+    
+    def calc_operating_margin(self):
+        self.check_earnings_data()
+        operating_income = self.earnings_data["income_statement"].pretax_income - self.earnings_data["income_statement"].non_operating_income
+        return 100*operating_income/self.earnings_data["income_statement"].sales
+    
+    def calc_EV(self):
+        self.check_earnings_data()
+        

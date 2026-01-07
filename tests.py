@@ -20,8 +20,10 @@ test_show_portfolio_mix = 0
 test_portfolio_performance_against_mean = 0
 compare_pharma = 0
 test_read_dolt_data = 0
-test_get_earnings_data = 0
-test_ROIC = 1
+test_get_earnings_data = 1
+test_ROIC = 0
+test_operating_margin = 0
+
 
 stock = "F"
 if stock in ["SPY"]:
@@ -251,3 +253,15 @@ if test_ROIC == True:
     plt.tight_layout()
     plt.show()
 
+if test_operating_margin == True:
+    reader = DataReader()
+    reader.get_earnings_data("PFE", "2010-01-01", "2025-12-01", "Quarter")
+    operating_margin = reader.calc_operating_margin()
+    fig = plt.figure()
+    ax = fig.add_subplot(1, 1, 1)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Operating Margin pct")
+    ax.plot(pd.to_datetime(reader.earnings_data["income_statement"]["date"]), operating_margin)
+    ax.set_title("Quarterly Operating Margin for PFE from 2010 to 2022")
+    plt.tight_layout()
+    plt.show()

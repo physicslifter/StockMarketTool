@@ -25,7 +25,7 @@ cursor.close()
 #query for getting the 1st 5 entries of Ford from balance_sheet_assets
 query = """
 SELECT *
-FROM balance_sheet_assets
+FROM cash_flow_statement
 WHERE act_symbol = 'F'
     AND date > '2015-01-01'
         AND date < '2019-03-14'
@@ -33,8 +33,8 @@ WHERE act_symbol = 'F'
 LIMIT = 1000;
 """
 
-query = "SELECT * FROM balance_sheet_assets WHERE act_symbol = 'F' AND date > '2015-01-01' AND date < '2019-03-14' AND period = 'Quarter';"
-
+query = "SELECT * FROM cash_flow_statement WHERE act_symbol = 'F' AND date > '2015-01-01' AND date < '2025-10-01' AND period = 'Quarter';"
+#query = "SELECT * FROM cash_flow_statement"
 df = pd.read_sql(query, conn)
 print(df.head())
 
