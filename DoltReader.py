@@ -84,6 +84,22 @@ class DataReader:
         operating_income = self.earnings_data["income_statement"].pretax_income - self.earnings_data["income_statement"].non_operating_income
         return 100*operating_income/self.earnings_data["income_statement"].sales
     
+    def calc_FCF_margin(self):
+        self.check_earnings_data()
+        operating_cash = self.earnings_data["cash_flow_statement"].net_cash_from_operating_activities
+        capex = self.earnings_data["cash_flow_statement"].property_and_equipment
+        revenue = self.earnings_data["income_statement"].sales
+        return 100*(operating_cash - capex)/revenue
+
     def calc_EV(self):
         self.check_earnings_data()
-        
+        market_cap = self.earnings_data["balance_sheet_equity"].shares_outstanding*self.earnings_data["balance_sheet_equity"].book_value_per_share
+        #debt = notes payable plus long term debt
+        total_debt = self.earnings_data["balance_sheet_liabilities"].long_term_debt + self.earnings_data["balance_sheet_liabilities"].notes_payable
+        preferred_stock = self.earnings_data["balance_sheet_equity"].preferred_stock
+        minority_interest = self.earnings_data["balance_sheet_liabilities"].minority_interest
+        cash_and_equivalents = self.earnings_data["balance_sheet_assets"].cash_and_equivalents
+        return market_cap + total_debt + preferred_stock + minority_interest - cash_and_equivalents
+    
+    def calc_EBITDA(self):
+        pass
