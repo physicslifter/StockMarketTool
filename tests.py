@@ -17,10 +17,10 @@ test_analysis_comparison_plot = 0
 test_baseline_compare = 0
 compare_beverage_stocks = 0
 test_show_portfolio_mix = 0
-test_portfolio_performance_against_mean = 0
+test_portfolio_performance_against_mean = 1
 compare_pharma = 0
 test_read_dolt_data = 0
-test_get_earnings_data = 1
+test_get_earnings_data = 0
 test_ROIC = 0
 test_operating_margin = 0
 
@@ -181,8 +181,8 @@ if test_portfolio_performance_against_mean == True:
     ax = fig.add_subplot(1, 1, 1)
     ax.set_xlabel("Date")
     ax.set_ylabel("Return")
-    ax.set_title("US Automakers perf against avg")
-    stocks = ["F", "GM", "STLA"]
+    ax.set_title("Paypal vs competitors")
+    stocks = ["PYPL", "ADYEY", "BLOCK", "GPN"]
     portfolio = Portfolio(stocks)
     start_date = np.datetime64("2023-12-01", "D")
     end_date = np.datetime64("2025-12-10", "D")
@@ -237,7 +237,7 @@ if test_read_dolt_data == True:
 
 if test_get_earnings_data == True:
     reader = DataReader()
-    data = reader.get_earnings_data("F", "2010-01-01", "2022-03-14", "Quarter")
+    data = reader.get_earnings_data("PFE", "2023-01-01", "2025-12-01", "Quarter")
     st()
 
 if test_ROIC == True:
