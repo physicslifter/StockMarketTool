@@ -55,6 +55,7 @@ class DataReader:
     def get_earnings_data(self, stock, start_date, end_date, report_type):
         if report_type not in ["Quarter", "Year"]:
             raise Exception("Report type must be quarter or year")
+        self.report_type = report_type
         conn = cnc.connect(host = "127.0.0.1", 
                            port = 3306, 
                            user = "root", 
@@ -73,6 +74,18 @@ class DataReader:
         self.has_earnings_data = True
         return pandas_data
     
+    def calc_earnings_variables(self):
+        variables = {
+            "ROIC": self.calc_ROIC(),
+            "operating_margin": self.calc_operating_margin(),
+            "FCF_margin": self.calc_FCF_margin(),
+            "FCF_yield": self.calc_FCF_yield(),
+            "EV/EBITDA": self.calc_EV_EBITDA(),
+            "rev_CAGR": self.calc_revenue_CAGR(),
+            "eps_CAGR": self.calc_EPS_CAGR()
+        }
+        return variables
+    
     def calc_ROIC(self):
         self.check_earnings_data()
         invested_capital = self.earnings_data["balance_sheet_assets"]["total_assets"] - self.earnings_data["balance_sheet_liabilities"]["total_liabilities"]
@@ -82,14 +95,20 @@ class DataReader:
     def calc_operating_margin(self):
         self.check_earnings_data()
         operating_income = self.earnings_data["income_statement"].pretax_income - self.earnings_data["income_statement"].non_operating_income
-        return 100*operating_income/self.earnings_data["income_statement"].sales
+        return operating_income/self.earnings_data["income_statement"].sales
     
     def calc_FCF_margin(self):
         self.check_earnings_data()
         operating_cash = self.earnings_data["cash_flow_statement"].net_cash_from_operating_activities
         capex = self.earnings_data["cash_flow_statement"].property_and_equipment
         revenue = self.earnings_data["income_statement"].sales
-        return 100*(operating_cash - capex)/revenue
+        return (operating_cash - capex)/revenue
+    
+    def calc_FCF_yield(self):
+        operating_cash = self.earnings_data["cash_flow_statement"].net_cash_from_operating_activities
+        capex = self.earnings_data["cash_flow_statement"].property_and_equipment
+        market_cap = self.earnings_data["balance_sheet_equity"].shares_outstanding*self.earnings_data["balance_sheet_equity"].book_value_per_share
+        return (operating_cash - capex)/market_cap
 
     def calc_EV(self):
         self.check_earnings_data()
@@ -102,4 +121,44 @@ class DataReader:
         return market_cap + total_debt + preferred_stock + minority_interest - cash_and_equivalents
     
     def calc_EBITDA(self):
+        return self.earnings_data["income_statement"].income_before_depreciation_and_amortization
+    
+    def calc_EV_EBITDA(self):
+        EV = self.calc_EV()
+        EBITDA = self.calc_EBITDA()
+        return EV/EBITDA
+    
+    def calc_revenue_CAGR(self):
+        revenue = self.earnings_data["income_statement"].sales
+        offset_revenue = revenue.shift(1)
+        my_exp = 4 if self.report_type == "Quarter" else 1
+        return (revenue/offset_revenue)**(my_exp)
+
+    def calc_EPS_CAGR(self):
+        eps = self.earnings_data["cash_flow_statement"]
+        offset_eps = eps.shift(1)
+        my_exp = 4 if self.report_type == "Quarter" else 1
+        return (eps/offset_eps)**my_exp - 1
+    
+class FundamentalsVisualizer:
+    def __init__(self, stocks, start_date, end_date):
+        '''
+        Stocks should be a list of stocks
+        '''
+        self.stocks = stocks
+        self.start_date = start_date
+        self.end_date = end_date
+        self.get_data()
+
+    def get_data(self):
+        fundamental_vars = {}
+        for c, stock in enumerate(self.stocks):
+            self.data = DataReader()
+            self.data.get_earnings_data(stock = stock, start_date = self.start_date, end_date = self.end_date, report_type = "Quarter")
+            fundamental_vars[stock] = self.data.calc_earnings_variables()
+
+    def setup_plot(self):
+        '''
+        Setup grid for 7 plots
+        '''
         pass
