@@ -17,12 +17,14 @@ test_analysis_comparison_plot = 0
 test_baseline_compare = 0
 compare_beverage_stocks = 0
 test_show_portfolio_mix = 0
-test_portfolio_performance_against_mean = 1
+test_portfolio_performance_against_mean = 0
 compare_pharma = 0
 test_read_dolt_data = 0
 test_get_earnings_data = 0
 test_ROIC = 0
 test_operating_margin = 0
+test_fundamentals_visualizer = 1 #view fundamentals of diff stocks
+test_get_eps_CAGR = 0 #get EPS CAGR data
 
 
 stock = "F"
@@ -265,3 +267,15 @@ if test_operating_margin == True:
     ax.set_title("Quarterly Operating Margin for PFE from 2010 to 2022")
     plt.tight_layout()
     plt.show()
+
+if test_fundamentals_visualizer == True:
+    stocks = ["PEP", "KO", "KDP"]
+    visualizer = FundamentalsVisualizer(stocks = stocks, 
+                                        start_date = "2023-01-01",
+                                        end_date = "2025-12-01")
+    
+if test_get_eps_CAGR == True:
+    reader = DataReader()
+    reader.get_earnings_data("PFE", "2010-01-01", "2025-12-01", "Quarter")
+    eps_CAGR = reader.calc_EPS_CAGR()
+    st()

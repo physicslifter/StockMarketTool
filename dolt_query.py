@@ -33,7 +33,7 @@ WHERE act_symbol = 'F'
 LIMIT = 1000;
 """
 
-query = "SELECT * FROM cash_flow_statement WHERE act_symbol = 'F' AND date > '2015-01-01' AND date < '2025-10-01' AND period = 'Quarter';"
+query = "SELECT * FROM cash_flow_statement WHERE act_symbol = 'PFE' AND date > '2015-01-01' AND date < '2025-10-01' AND period = 'Quarter';"
 #query = "SELECT * FROM cash_flow_statement"
 df = pd.read_sql(query, conn)
 print(df.head())

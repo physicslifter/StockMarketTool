@@ -6,6 +6,7 @@ the dolt stock market database from post-no-preference
 from mysql import connector as cnc
 import pandas as pd
 import numpy as np
+from matplotlib import pyplot as plt
 
 database_names = ["earnings", "options", "stocks"]
 report_types = ["quarterly", "yearly"]
@@ -135,7 +136,7 @@ class DataReader:
         return (revenue/offset_revenue)**(my_exp)
 
     def calc_EPS_CAGR(self):
-        eps = self.earnings_data["cash_flow_statement"]
+        eps = self.earnings_data["cash_flow_statement"].diluted_net_eps
         offset_eps = eps.shift(1)
         my_exp = 4 if self.report_type == "Quarter" else 1
         return (eps/offset_eps)**my_exp - 1
@@ -149,16 +150,39 @@ class FundamentalsVisualizer:
         self.start_date = start_date
         self.end_date = end_date
         self.get_data()
+        self.setup_plot()
 
     def get_data(self):
         fundamental_vars = {}
+        self.dates = {}
         for c, stock in enumerate(self.stocks):
-            self.data = DataReader()
-            self.data.get_earnings_data(stock = stock, start_date = self.start_date, end_date = self.end_date, report_type = "Quarter")
-            fundamental_vars[stock] = self.data.calc_earnings_variables()
+            data = DataReader()
+            data.get_earnings_data(stock = stock, start_date = self.start_date, end_date = self.end_date, report_type = "Quarter")
+            fundamental_vars[stock] = data.calc_earnings_variables()
+            dates = pd.to_datetime(data.earnings_data["income_statement"]["date"])
+            self.dates[stock] = dates
+        self.fundamental_vars = fundamental_vars
 
     def setup_plot(self):
         '''
         Setup grid for 7 plots
         '''
-        pass
+        fig = plt.figure(figsize = (14, 8))
+        for c, var in enumerate(self.fundamental_vars[self.stocks[0]].keys()):
+            print(var)
+            ax = fig.add_subplot(2, 4, c + 1)
+            ax.set_title(var)
+            for stock in self.stocks:
+                if c == 0:
+                    print(stock, self.dates[stock])
+                ax.plot(self.dates[stock], self.fundamental_vars[stock][var], label = stock)
+            ax.legend()
+        for ax in fig.axes:
+            ax.tick_params(axis="x", labelbottom=True)
+            plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+        #fig.autofmt_xdate()
+        plt.tight_layout()
+        plt.show()
+
+
+        
