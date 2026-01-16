@@ -224,19 +224,6 @@ if compare_pharma == True:
     plt.tight_layout()
     plt.show()
 
-if test_read_dolt_data == True:
-    reader = DataReader()
-    tables = ["cash_flow_statement", "balance_sheet_liabilities", "balance_sheet_equity", "balance_sheet_assets", "income_statement"]
-    data = reader.get_data(database_name = "earnings",
-                    stock = "F",
-                    start_date = np.datetime64("2015-01-01", "D"),
-                    end_date = np.datetime64("2021-03-14", "D"),
-                    report_type = "Quarter",
-                    table_names = tables)
-    for key in data.keys():
-        print(key, len(data[key]))
-    st()
-
 if test_get_earnings_data == True:
     reader = DataReader()
     data = reader.get_earnings_data("PFE", "2023-01-01", "2025-12-01", "Quarter")
@@ -269,7 +256,7 @@ if test_operating_margin == True:
     plt.show()
 
 if test_fundamentals_visualizer == True:
-    stocks = ["PEP", "KO", "KDP"]
+    stocks = ["XOM", "CVX", "COP", "WMB", "EPD"]
     visualizer = FundamentalsVisualizer(stocks = stocks, 
                                         start_date = "2023-01-01",
                                         end_date = "2025-12-01")

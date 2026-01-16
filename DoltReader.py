@@ -14,40 +14,10 @@ report_types = ["quarterly", "yearly"]
 class DataReader:
     def __init__(self):
         self.has_earnings_data = False
-
-    def get_data(self, database_name, stock, start_date:np.datetime64, end_date:np.datetime64, report_type:str, table_names:list = None):
-        if database_name.lower() not in database_names:
-            raise Exception(f"Invalid dataset name. Must be one of {database_names}")
-        if report_type not in ["Quarter", "Year"]:
-            raise Exception("Report type must be quarter or year")
-        #connect to the dataset
-        conn = cnc.connect(host = "127.0.0.1", 
-                   port = 3306, 
-                   user = "root", 
-                   password = "", 
-                   database = database_name)
-        cursor = conn.cursor(buffered = True)
-        cursor.execute("SHOW TABLES;")
-        tables = [i[0] for i in cursor.fetchall()]
-        cursor.close()
-        if type(table_names) == type(None): #if no tables are specified, use all tables
-            table_names = tables
-        else:
-            for name in table_names:
-                if name not in tables:
-                    raise Exception(f"Table name {name} invalid for database {database_name}. Must be one of {tables}")
-        
-        start_date_str, end_date_str = str(start_date).split(" ")[0], str(end_date).split(" ")[0] 
-        pandas_data = {}
-        for table_name in table_names:
-            print(table_name)
-            query = f"SELECT * FROM {table_name} WHERE act_symbol = '{stock}' AND date > '{start_date}' AND date < '{end_date}' AND period = '{report_type}';"
-            print(query)
-            df = pd.read_sql(query, conn)
-            pandas_data[table_name] = df
-
-        return pandas_data
+        self.has_stock_data = False
     
+    #=====
+    #Earnings
     def check_earnings_data(self):
         #ensures that earnings data has been retrieved
         if self.has_earnings_data == False:
@@ -140,6 +110,28 @@ class DataReader:
         offset_eps = eps.shift(1)
         my_exp = 4 if self.report_type == "Quarter" else 1
         return (eps/offset_eps)**my_exp - 1
+    #=====
+
+    #=====
+    #Stock data
+    def check_stock_data(self):
+
+    
+class StockDataReader:
+    '''
+    Reading symbol, split, price and dividend data from 
+    post-no-preference/stocks database
+    '''
+    def __init__(self, stock, start_date, end_date):
+        pass
+
+    def get_data(self, stock, start_date, end_date):
+        conn = cnc.connect(host = "127.0.0.1", 
+                           port = 3306, 
+                           user = "root", 
+                           password = "", 
+                           database = "earnings")
+        cursor = conn.cursor(buffered = True)
     
 class FundamentalsVisualizer:
     def __init__(self, stocks, start_date, end_date):
