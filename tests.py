@@ -23,8 +23,9 @@ test_read_dolt_data = 0
 test_get_earnings_data = 0
 test_ROIC = 0
 test_operating_margin = 0
-test_fundamentals_visualizer = 1 #view fundamentals of diff stocks
+test_fundamentals_visualizer = 0 #view fundamentals of diff stocks
 test_get_eps_CAGR = 0 #get EPS CAGR data
+test_get_dolt_stock_data = 1
 
 
 stock = "F"
@@ -265,4 +266,10 @@ if test_get_eps_CAGR == True:
     reader = DataReader()
     reader.get_earnings_data("PFE", "2010-01-01", "2025-12-01", "Quarter")
     eps_CAGR = reader.calc_EPS_CAGR()
+    st()
+
+if test_get_dolt_stock_data == True:
+    dr = DataReader()
+    dr.get_stock_data("F", "2024-01-01", "2025-01-31")
+    print(dr.stock_data["ohlcv"].head())
     st()

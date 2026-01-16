@@ -15,7 +15,14 @@ class DataReader:
     def __init__(self):
         self.has_earnings_data = False
         self.has_stock_data = False
+        self.set_connection()
     
+    def set_connection(self):
+        self.conn = cnc.connect(host = "127.0.0.1", 
+                           port = 3306, 
+                           user = "root", 
+                           password = "", 
+                           database = None)
     #=====
     #Earnings
     def check_earnings_data(self):
@@ -27,19 +34,13 @@ class DataReader:
         if report_type not in ["Quarter", "Year"]:
             raise Exception("Report type must be quarter or year")
         self.report_type = report_type
-        conn = cnc.connect(host = "127.0.0.1", 
-                           port = 3306, 
-                           user = "root", 
-                           password = "", 
-                           database = "earnings")
-        cursor = conn.cursor(buffered = True)
         tables = ["balance_sheet_liabilities", "balance_sheet_equity", "balance_sheet_assets", "income_statement", "cash_flow_statement"]
         pandas_data = {}
         for table_name in tables:
                 print(table_name)
-                query = f"SELECT * FROM {table_name} WHERE act_symbol = '{stock}' AND date > '{start_date}' AND date < '{end_date}' AND period = '{report_type}';"
+                query = f"SELECT * FROM earnings.{table_name} WHERE act_symbol = '{stock}' AND date > '{start_date}' AND date < '{end_date}' AND period = '{report_type}';"
                 print(query)
-                df = pd.read_sql(query, conn)
+                df = pd.read_sql(query, self.conn)
                 pandas_data[table_name] = df
         self.earnings_data = pandas_data
         self.has_earnings_data = True
@@ -115,24 +116,25 @@ class DataReader:
     #=====
     #Stock data
     def check_stock_data(self):
+        if self.has_stock_data == False:
+            raise Exception("No stock data retrieved")
+        
+    def get_stock_data(self, stock, start_date, end_date):
+        tables = ["dividend", "ohlcv", "split"]
+        pandas_data = {}
+        for table_name in tables:
+            print(table_name)
+            date_key = "date" if table_name == "ohlcv" else "ex_date"
+            query = f"SELECT * FROM stocks.{table_name} WHERE act_symbol = '{stock}' AND {date_key} > '{start_date}' AND {date_key} < '{end_date}';"
+            df = pd.read_sql(query, self.conn)
+            pandas_data[table_name] = df
+        #add symbol info
+        symbol_info_query = f"SELECT * FROM stocks.symbol WHERE act_symbol = '{stock}'"
+        symbol_info = pd.read_sql(symbol_info_query, self.conn)
+        pandas_data["symbol_info"] = symbol_info
+        self.stock_data = pandas_data
+        self.has_stock_data = True
 
-    
-class StockDataReader:
-    '''
-    Reading symbol, split, price and dividend data from 
-    post-no-preference/stocks database
-    '''
-    def __init__(self, stock, start_date, end_date):
-        pass
-
-    def get_data(self, stock, start_date, end_date):
-        conn = cnc.connect(host = "127.0.0.1", 
-                           port = 3306, 
-                           user = "root", 
-                           password = "", 
-                           database = "earnings")
-        cursor = conn.cursor(buffered = True)
-    
 class FundamentalsVisualizer:
     def __init__(self, stocks, start_date, end_date):
         '''
