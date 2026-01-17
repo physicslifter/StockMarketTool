@@ -6,30 +6,54 @@ from datetime import datetime
 from matplotlib import pyplot as plt
 import numpy as np
 from pdb import set_trace as st
+from DoltReader import DataReader
 
 class Strategy:
     def __init__(self, name):
         self.name = name
 
 class Stock:
-    def __init__(self, name):
+    '''
+    Class for stocks downloaded from NASDAQ
+    '''
+    def __init__(self, name, data_type="nasdaq_csv"):
         self.name = name
+        self.set_data_type(data_type)
         self.get_data()
         self.get_log_returns()
 
+    def set_data_type(self, data_type):
+        valid_data_types = ["nasdaq_csv", "dolt"]
+        if data_type not in valid_data_types:
+            raise Exception(f"{data_type} is not valid must be nasdaq_csv or dolt")
+        else:
+            self.data_type = data_type
+
     def get_data(self):
-        try:
-            if self.name not in ["SPY"]:
-                converters = {}
-                for key in ["Close/Last", "Open", "High", "Low"]:
-                    converters[key] = lambda s: float(s.replace('$', ''))
-                self.data = pd.read_csv(f"Data/{self.name}.csv", converters = converters)
-            else:
-                self.data = pd.read_csv(f"Data/{self.name}.csv")
-        except:
-            raise Exception(f"Data for {self.name} not found")
-        self.data["Date"] = pd.to_datetime(self.data["Date"])
-        self.data = self.data.iloc[::-1].reset_index(drop = True)
+        if self.data_type == "nasdaq_csv":
+            try:
+                if self.name not in ["SPY"]:
+                    converters = {}
+                    for key in ["Close/Last", "Open", "High", "Low"]:
+                        converters[key] = lambda s: float(s.replace('$', ''))
+                    self.data = pd.read_csv(f"Data/{self.name}.csv", converters = converters)
+                else:
+                    self.data = pd.read_csv(f"Data/{self.name}.csv")
+            except:
+                raise Exception(f"Data for {self.name} not found")
+            self.data["Date"] = pd.to_datetime(self.data["Date"])
+            self.data = self.data.iloc[::-1].reset_index(drop = True)
+        else:
+            now = datetime.now()
+            month_string = f"0{now.month}" if len(str(now.month)) == 1 else now.month
+            day_string = f"0{now.day}" if len(str(now.day)) == 1 else now.day
+            current_date = f"{now.year}-{month_string}-{day_string}"
+            dr = DataReader()
+            dr.get_stock_data(self.name, "2000-01-01", current_date)
+            self.data = dr.stock_data["ohlcv"]
+            self.data = self.data.rename(columns = {"date":"Date", "open":"Open", "high": "High", "low": "Low", "close":"Close/Last", "volume": "Volume"})
+            self.data["Date"] = pd.to_datetime(self.data["Date"])
+            
         
     def chop_data(self, start_date, end_date):
         '''
@@ -92,10 +116,10 @@ def align_data(data1, data2):
 
         
 class Portfolio:
-    def __init__(self, stocks:list):
+    def __init__(self, stocks:list, data_type:str="nasdaq_csv"):
         self.stocks = {}
         for stock in stocks:
-            self.stocks[stock] = (Stock(stock))
+            self.stocks[stock] = Stock(stock, data_type)
         self.data = None
     
     def chop_data(self, start_date, end_date):
