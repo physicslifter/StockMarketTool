@@ -25,7 +25,9 @@ test_ROIC = 0
 test_operating_margin = 0
 test_fundamentals_visualizer = 0 #view fundamentals of diff stocks
 test_get_eps_CAGR = 0 #get EPS CAGR data
-test_get_dolt_stock_data = 1
+test_get_dolt_stock_data = 0
+test_get_dolt_data = 0
+test_add_release_date = 1
 
 
 stock = "F"
@@ -272,4 +274,26 @@ if test_get_dolt_stock_data == True:
     dr = DataReader()
     dr.get_stock_data("F", "2024-01-01", "2025-01-31")
     print(dr.stock_data["ohlcv"].head())
+    st()
+
+if test_get_dolt_data == True:
+    #same as test performance against mean, but now we're reading data from dolt
+    fig = plt.figure(figsize = (8, 5))
+    ax = fig.add_subplot(1, 1, 1)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Return")
+    ax.set_title("Paypal vs competitors")
+    stocks = ["PYPL", "ADYEY", "BLOCK", "GPN"]
+    portfolio = Portfolio(stocks, data_type = "dolt")
+    start_date = np.datetime64("2023-12-01", "D")
+    end_date = np.datetime64("2025-12-10", "D")
+    portfolio.chop_data(start_date, end_date)
+    portfolio.show_performance_wrt_mean(ax)
+    ax.legend()
+    plt.tight_layout()
+    plt.show()
+
+if test_add_release_date == True:
+    dr = DataReader()
+    dr.get_all_data("F", "2022-01-01", "2025-01-31")
     st()
