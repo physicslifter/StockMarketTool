@@ -58,6 +58,71 @@ class DataReader:
         if self.has_stock_data:
             self._compute_days_since()
 
+    def merge_earnings_vars_into_ohlcv(self):
+        '''
+        Merges calculated earnings variables into the OHLCV stock data.
+        Aligns variables to release dates by matching period end dates to the 
+        next available calendar date, then merges into stock price history.
+        '''
+        if not hasattr(self, 'earnings_variables') or 'ohlcv' not in self.stock_data:
+            return
+
+        # 1. Prepare Financial Variables with Period End Dates
+        vars_df = pd.DataFrame(self.earnings_variables)
+        
+        # We need the period end date to map to a release date.
+        # Assuming income_statement aligns with the calculated variables.
+        if 'income_statement' in self.earnings_data:
+            vars_df['period_end'] = pd.to_datetime(self.earnings_data['income_statement']['date'])
+        else:
+            return
+
+        # Filter out rows without a period date and sort
+        vars_df = vars_df.dropna(subset=['period_end']).sort_values('period_end')
+
+        # 2. Map Release Dates to Financial Periods using merge_asof
+        if hasattr(self, 'earnings_calendar'):
+            calendar = self.earnings_calendar.copy()
+            calendar['date'] = pd.to_datetime(calendar['date'])
+            calendar = calendar.sort_values('date')
+            
+            # Find the NEXT release date for each period end (direction='forward')
+            # matching period_end to the closest future calendar date
+            vars_with_dates = pd.merge_asof(
+                vars_df,
+                calendar[['date']].rename(columns={'date': 'release_date'}),
+                left_on='period_end',
+                right_on='release_date',
+                direction='forward'
+            )
+        else:
+            return
+
+        # 3. Merge Financials into OHLCV
+        ohlcv = self.stock_data['ohlcv']
+        ohlcv['date'] = pd.to_datetime(ohlcv['date'])
+        ohlcv = ohlcv.sort_values('date')
+        
+        # Prepare right-side (financials) for merge
+        vars_with_dates = vars_with_dates.dropna(subset=['release_date'])
+        vars_with_dates = vars_with_dates.sort_values('release_date')
+        
+        # Drop period_end (and duplicate release_date from merge if any) to clean up
+        # We only need the payload and the key
+        cols_to_drop = ['period_end']
+        vars_final = vars_with_dates.drop(columns=cols_to_drop, errors='ignore')
+        
+        # Merge backward: For every stock date, get the most recent past release
+        merged_df = pd.merge_asof(
+            ohlcv,
+            vars_final,
+            left_on='date',
+            right_on='release_date',
+            direction='backward'
+        )
+        
+        self.stock_data['ohlcv'] = merged_df
+
     def _compute_days_since(self):
         '''
         Internal helper: Merges OHLCV with Calendar to calculate days since release.
@@ -96,6 +161,7 @@ class DataReader:
         self.get_earnings_data(stock, start_date, end_date, report_type = "Quarter")
         self.calc_earnings_variables()
         self.get_stock_data(stock, start_date, end_date)
+        self.merge_earnings_vars_into_ohlcv()
 
     def get_earnings_data(self, stock, start_date, end_date, report_type):
         if report_type not in ["Quarter", "Year"]:
@@ -125,6 +191,7 @@ class DataReader:
             "rev_CAGR": self.calc_revenue_CAGR(),
             "eps_CAGR": self.calc_EPS_CAGR()
         }
+        self.earnings_variables = variables
         return variables
     
     def calc_ROIC(self):
@@ -204,6 +271,10 @@ class DataReader:
         pandas_data["symbol_info"] = symbol_info
         
         self.stock_data = pandas_data
+        ohlcv = self.stock_data["ohlcv"]
+        self.stock_data["ohlcv"]["log_ret"] = np.log(ohlcv.close/ohlcv.close.shift(1))
+        self.stock_data["ohlcv"]["prev_close"] = ohlcv.close.shift(1)
+        self.stock_data["ohlcv"]["prev_ret"] = ohlcv.log_ret.shift(1)
         self.has_stock_data = True
         
         # --- NEW ADDITION ---
