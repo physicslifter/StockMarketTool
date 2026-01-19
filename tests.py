@@ -27,8 +27,9 @@ test_fundamentals_visualizer = 0 #view fundamentals of diff stocks
 test_get_eps_CAGR = 0 #get EPS CAGR data
 test_get_dolt_stock_data = 0
 test_get_dolt_data = 0
-test_add_release_date = 1
+test_add_release_date = 0
 test_data_alignment = 0
+test_stock_split = 1
 
 
 stock = "F"
@@ -312,3 +313,33 @@ if test_data_alignment == True:
     print(data_to_show, fun_data_to_show)
     print(data_to_show[data_to_show.date == np.datetime64("2023-05-18")])
     print(data_to_show[data_to_show.date == np.datetime64("2023-05-01")])
+
+if test_stock_split == True:
+    dr = DataReader()
+    stocks = ["TSLA", "GOOGL", "SHOP", "AMZN"]
+    fig = plt.figure(figsize = (8, 8))
+    for c, stock in enumerate(stocks):
+        ax = fig.add_subplot(2, 2, c + 1)
+
+        #show data without split accounted for
+        dr.get_all_data(stock, "2022-01-01", "2023-01-31", stock_splits = False)
+        ax.plot(dr.stock_data["ohlcv"].date, dr.stock_data["ohlcv"].open, label = "Splits not accounted for", linewidth = 2)
+        
+        #show data with split accounted for
+        dr.get_all_data(stock, "2022-01-01", "2023-01-31", stock_splits = True)
+        ax.plot(dr.stock_data["ohlcv"].date, dr.stock_data["ohlcv"].open, label = "Splits accounted for", linestyle = "--", linewidth = 2)
+        
+        #show data from NASDAQ (which already accounts for splits)
+        N = Stock(stock)
+        N.chop_data(start_date = np.datetime64("2022-01-01"), end_date = np.datetime64("2023-01-31"))
+        ax.plot(N.data["Date"], N.data["Open"], label = "NASDAQ Data", linestyle = ":", c = "magenta")
+
+        #labeling
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Open")
+        ax.set_title(f"{stock} Split vs Unsplit data")
+        ax.legend()
+    plt.show()
+
+
+
