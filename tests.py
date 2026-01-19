@@ -28,6 +28,7 @@ test_get_eps_CAGR = 0 #get EPS CAGR data
 test_get_dolt_stock_data = 0
 test_get_dolt_data = 0
 test_add_release_date = 1
+test_data_alignment = 0
 
 
 stock = "F"
@@ -296,4 +297,18 @@ if test_get_dolt_data == True:
 if test_add_release_date == True:
     dr = DataReader()
     dr.get_all_data("F", "2022-01-01", "2025-01-31")
+    df = dr.stock_data["ohlcv"]
     st()
+
+if test_data_alignment == True:
+    dr = DataReader()
+    dr.get_all_data("F", "2022-01-01", "2025-01-31")
+    keys_to_show = ["release_date", "date", "FCF_margin"]
+    hiding_df_keys = [key for key in dr.stock_data["ohlcv"].keys() if key not in keys_to_show]
+    data_to_show = dr.stock_data["ohlcv"].drop(hiding_df_keys, axis = 1)
+    fun_data_to_show = pd.DataFrame({"date": dr.earnings_data["income_statement"].date.values, "FCF_margin":dr.earnings_variables["FCF_margin"]})
+    data_to_show = data_to_show[data_to_show.date > np.datetime64("2022-06-01")]
+    #fun_data_to_show = fun_data_to_show[fun_data_to_show.date > np.datetime64("2022-06-01")]
+    print(data_to_show, fun_data_to_show)
+    print(data_to_show[data_to_show.date == np.datetime64("2023-05-18")])
+    print(data_to_show[data_to_show.date == np.datetime64("2023-05-01")])
