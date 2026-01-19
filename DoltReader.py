@@ -157,10 +157,12 @@ class DataReader:
         # We use the index to ensure alignment in case sort changed order
         self.stock_data['ohlcv']['days_since_release'] = days_since.values
 
-    def get_all_data(self, stock, start_date, end_date):
+    def get_all_data(self, stock, start_date, end_date, stock_splits:bool = True):
+        self.has_stock_data = False
+        self.stock_data = {}
         self.get_earnings_data(stock, start_date, end_date, report_type = "Quarter")
         self.calc_earnings_variables()
-        self.get_stock_data(stock, start_date, end_date)
+        self.get_stock_data(stock, start_date, end_date, stock_splits)
         self.merge_earnings_vars_into_ohlcv()
 
     def get_earnings_data(self, stock, start_date, end_date, report_type):
@@ -255,7 +257,95 @@ class DataReader:
         if self.has_stock_data == False:
             raise Exception("No stock data retrieved")
         
-    def get_stock_data(self, stock, start_date, end_date):
+    def adjust_for_splits(self):
+        '''
+        Adjusts OHLCV prices and volume for stock splits.
+        Uses 'to_factor' and 'for_factor'.
+        Includes logic to detect and skip 'phantom' duplicate split records 
+        where the price did not actually drop (e.g. Record Date vs Ex-Date).
+        '''
+        if not hasattr(self, 'stock_data'): return
+        if "split" not in self.stock_data or "ohlcv" not in self.stock_data: return
+        
+        splits = self.stock_data["split"]
+        ohlcv = self.stock_data["ohlcv"]
+
+        if splits.empty or ohlcv.empty: return
+
+        # Work on copies to prevent index warnings
+        splits = splits.copy()
+        ohlcv['date'] = pd.to_datetime(ohlcv['date'])
+        
+        # Sort splits by date to process chronologically
+        splits = splits.sort_values('ex_date')
+
+        for _, row in splits.iterrows():
+            split_date = pd.to_datetime(row['ex_date'])
+            
+            # 1. Calculate Ratio from to_factor / for_factor
+            try:
+                # Use .get() to be safe, default to 0
+                tf = float(row.get('to_factor', 0))
+                ff = float(row.get('for_factor', 0))
+                
+                # Calculate ratio (e.g. 20 / 1 = 20.0)
+                if tf > 0 and ff > 0:
+                    ratio = tf / ff
+                else:
+                    # Fallback if columns are missing but 'ratio' exists
+                    ratio = float(row.get('ratio', 0))
+            except:
+                continue
+
+            # Skip invalid ratios
+            if ratio <= 0 or ratio == 1.0:
+                continue
+
+            # 2. VALIDATION: Check if the price actually dropped on this date
+            # This filters out the duplicate "May 26" row where price didn't move.
+            
+            # Get data immediately surrounding the split
+            # We look for the last close BEFORE the split and the first close AFTER
+            mask_pre = ohlcv['date'] < split_date
+            mask_post = ohlcv['date'] >= split_date
+            
+            # Only validate if we have data on both sides of the date
+            if mask_pre.any() and mask_post.any():
+                prev_close = ohlcv.loc[mask_pre, 'close'].iloc[-1]
+                curr_close = ohlcv.loc[mask_post, 'close'].iloc[0]
+                
+                # Calculate the observed drop in the market data
+                # e.g. Prev $2400 / Curr $120 = 20.0
+                observed_drop = prev_close / curr_close
+                
+                # Compare Observed vs Expected (Allow 25% slack for market volatility)
+                # If ratio is 20, we accept an observed drop between 15 and 25.
+                error_margin = abs(observed_drop - ratio) / ratio
+                
+                if error_margin > 0.25:
+                    print(f"DEBUG: Skipping split on {split_date.date()} (Ratio {ratio}). "
+                          f"Price did not drop (Observed: {observed_drop:.2f}).")
+                    continue
+                else:
+                    print(f"DEBUG: Verified split on {split_date.date()}. "
+                          f"Price dropped by factor {observed_drop:.2f}. Adjusting...")
+
+            # 3. Apply Adjustment
+            # Divide historical prices by the ratio
+            price_cols = ['open', 'high', 'low', 'close', 'prev_close']
+            # Case-insensitive match for columns
+            for col in ohlcv.columns:
+                if col.lower() in price_cols:
+                    ohlcv.loc[mask_pre, col] = ohlcv.loc[mask_pre, col] / ratio
+            
+            # Multiply historical volume by the ratio
+            for col in ohlcv.columns:
+                if col.lower() == 'volume':
+                    ohlcv.loc[mask_pre, col] = ohlcv.loc[mask_pre, col] * ratio
+
+        self.stock_data["ohlcv"] = ohlcv
+
+    def get_stock_data(self, stock, start_date, end_date, account_for_splits:bool=True):
         tables = ["dividend", "ohlcv", "split"]
         pandas_data = {}
         for table_name in tables:
@@ -271,6 +361,10 @@ class DataReader:
         pandas_data["symbol_info"] = symbol_info
         
         self.stock_data = pandas_data
+
+        if account_for_splits == True:
+            self.adjust_for_splits()
+
         ohlcv = self.stock_data["ohlcv"]
         self.stock_data["ohlcv"]["log_ret"] = np.log(ohlcv.close/ohlcv.close.shift(1))
         self.stock_data["ohlcv"]["prev_close"] = ohlcv.close.shift(1)
