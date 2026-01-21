@@ -371,10 +371,20 @@ class DataReader:
         self.stock_data["ohlcv"]["prev_ret"] = ohlcv.log_ret.shift(1)
         self.has_stock_data = True
         
-        # --- NEW ADDITION ---
+        self.calc_additional_price_variables()
         # If earnings data (and calendar) was loaded first, trigger the calculation now
         if hasattr(self, 'earnings_calendar'):
             self._compute_days_since()
+
+    def calc_additional_price_variables(self):
+        if self.has_stock_data == False:
+            raise Exception("No stock data exists")
+        #returns (1, 5 & 20 day)
+        for length in [5, 20]:
+            self.stock_data["ohlcv"][f"{length}_day_log_ret"] = self.stock_data["ohlcv"]["log_ret"].rolling(window = length).sum()
+
+        #volatility (20d)
+        self.stock_data["ohlcv"]["20d_volatility"] = self.stock_data["ohlcv"]["log_ret"].rolling(window = 20).std()
 
 class FundamentalsVisualizer:
     def __init__(self, stocks, start_date, end_date):
