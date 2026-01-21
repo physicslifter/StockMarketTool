@@ -162,7 +162,7 @@ class DataReader:
         self.stock_data = {}
         self.get_earnings_data(stock, start_date, end_date, report_type = "Quarter")
         self.calc_earnings_variables()
-        self.get_stock_data(stock, start_date, end_date, stock_splits)
+        self.get_stock_data(stock, start_date, end_date, stock_splits, calc_all = True)
         self.merge_earnings_vars_into_ohlcv()
 
     def get_earnings_data(self, stock, start_date, end_date, report_type):
@@ -345,7 +345,7 @@ class DataReader:
 
         self.stock_data["ohlcv"] = ohlcv
 
-    def get_stock_data(self, stock, start_date, end_date, account_for_splits:bool=True):
+    def get_stock_data(self, stock, start_date, end_date, account_for_splits:bool=True, calc_all:bool = True):
         tables = ["dividend", "ohlcv", "split"]
         pandas_data = {}
         for table_name in tables:
@@ -371,8 +371,9 @@ class DataReader:
         self.stock_data["ohlcv"]["prev_ret"] = ohlcv.log_ret.shift(1)
         self.has_stock_data = True
         
-        self.calc_additional_price_variables()
-        # If earnings data (and calendar) was loaded first, trigger the calculation now
+        if calc_all == True:
+            self.calc_additional_price_variables()
+            # If earnings data (and calendar) was loaded first, trigger the calculation now
         if hasattr(self, 'earnings_calendar'):
             self._compute_days_since()
 
