@@ -12,10 +12,9 @@ import matplotlib.pyplot as plt
 
 #get data
 dr = DataReader()
-dr.get_all_data("F", "2022-01-01", "2025-12-31")
+dr.get_all_data("PFE", "2012-01-01", "2025-12-31")
 
 df = dr.stock_data["ohlcv"]
-
 
 #get feature data
 data_keys = ["prev_ret", 
@@ -28,7 +27,10 @@ data_keys = ["prev_ret",
                 #"EV/EBITDA",
                 #"rev_CAGR",
                 #"eps_CAGR",
-                "log_ret"
+                "log_ret",
+                "5_day_log_ret",
+                "20_day_log_ret",
+                "20d_volatility"
                 ]
 keys_to_drop = [key for key in df.keys() if key not in data_keys]
 data = df.drop(keys_to_drop, axis = 1)
@@ -165,5 +167,3 @@ plt.show()
 # 5. Feature Importance (To see what drove the decisions)
 lgb.plot_importance(model, max_num_features=10)
 plt.show()
-
-#st()
