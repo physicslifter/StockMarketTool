@@ -207,4 +207,9 @@ marimo/_lsp/
 __marimo__/
 
 .DS_STORE
-data/.DS_STORE
+Data/.DS_STORE
+Data/all_ohlcv.fether
+Data/all_ohlcv.feather
+BTC_trade.xlsx
+Data/.DS_Store
+Data/.DS_Store
