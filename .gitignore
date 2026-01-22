@@ -213,3 +213,7 @@ Data/all_ohlcv.feather
 BTC_trade.xlsx
 Data/.DS_Store
 Data/.DS_Store
+sample.csv
+sample.feather
+sample
+Data/ETFs.feather
