@@ -29,7 +29,8 @@ test_get_dolt_stock_data = 0
 test_get_dolt_data = 0
 test_add_release_date = 0
 test_data_alignment = 0
-test_stock_split = 1
+test_stock_split = 0
+test_batch_stock_split = 1 
 
 
 stock = "F"
@@ -341,5 +342,62 @@ if test_stock_split == True:
         ax.legend()
     plt.show()
 
+if test_batch_stock_split == True:
+    dr_single = DataReader()
+    dr_batch = DataReader()
+    
+    # These stocks all had major splits in 2022
+    stocks = ["TSLA", "GOOGL", "SHOP", "AMZN"]
+    start_date = "2022-01-01"
+    end_date = "2023-01-31"
+    
+    # 1. Run the NEW Batch Method ONCE for all stocks
+    # This tests the efficiency and the cross-contamination logic
+    print(f"Running Batch Retrieval for {stocks}...")
+    dr_batch.get_batch_stock_data(stocks_list=stocks, start_date=start_date, end_date=end_date)
+    batch_ohlcv = dr_batch.stock_data["ohlcv"]
 
+    fig = plt.figure(figsize=(12, 10))
+    
+    for c, stock in enumerate(stocks):
+        ax = fig.add_subplot(2, 2, c + 1)
+        
+        # 2. Run the ORIGINAL Single Method for this stock (Baseline 1)
+        print(f"Running Single Retrieval for {stock}...")
+        dr_single.get_all_data(stock, start_date, end_date, stock_splits=True)
+        single_ohlcv = dr_single.stock_data["ohlcv"]
+        
+        # 3. Get NASDAQ Data (Baseline 2 - External Truth)
+        nasdaq_ref = Stock(stock)
+        nasdaq_ref.chop_data(start_date=np.datetime64(start_date), end_date=np.datetime64(end_date))
+        
+        # 4. Extract this specific stock from the Batch result
+        this_stock_batch = batch_ohlcv[batch_ohlcv['act_symbol'] == stock].sort_values('date')
 
+        # --- PLOTTING ---
+        # CYAN: The original single-stock function
+        ax.plot(single_ohlcv.date, single_ohlcv.open, 
+                label="Original Single-Stock", linewidth=4, c="cyan", alpha=0.4)
+        
+        # MAGENTA: The NASDAQ truth (already adjusted)
+        ax.plot(nasdaq_ref.data["Date"], nasdaq_ref.data["Open"], 
+                label="NASDAQ Reference", linestyle=":", c="magenta", linewidth=2)
+        
+        # WHITE DASHED: The new Batch result
+        ax.plot(this_stock_batch.date, this_stock_batch.open, 
+                label="New Batch Method", linestyle="--", c="white", linewidth=1.5)
+
+        # Verification: Check if Single matches Batch exactly
+        # We handle potential length mismatches (NaNs) using np.allclose
+        match = len(single_ohlcv) == len(this_stock_batch)
+        status = "PASSED" if match else "LEN MISMATCH"
+        
+        # Labeling
+        ax.set_title(f"{stock} Split Verification - {status}")
+        ax.set_xlabel("Date")
+        ax.set_ylabel("Adjusted Open Price")
+        ax.legend(fontsize='small')
+        
+    plt.suptitle("Batch vs Single-Stock Split Adjustment Verification", fontsize=16)
+    plt.tight_layout()
+    plt.show()
