@@ -387,6 +387,152 @@ class DataReader:
         #volatility (20d)
         self.stock_data["ohlcv"]["20d_volatility"] = self.stock_data["ohlcv"]["log_ret"].rolling(window = 20).std()
 
+    #====
+    #Batch data functions from Gemini
+    def adjust_for_splits_batch(self):
+        '''
+        Batch-safe version: Adjusts OHLCV prices/volume for splits.
+        Ensures adjustments are applied ONLY to the specific stock symbol.
+        '''
+        if not hasattr(self, 'stock_data'): return
+        if "split" not in self.stock_data or "ohlcv" not in self.stock_data: return
+        
+        splits = self.stock_data["split"]
+        ohlcv = self.stock_data["ohlcv"]
+
+        if splits.empty or ohlcv.empty: return
+
+        # Sort splits by date to process chronologically
+        splits = splits.sort_values('ex_date')
+        
+        # Ensure date columns are datetime
+        ohlcv['date'] = pd.to_datetime(ohlcv['date'])
+
+        for _, row in splits.iterrows():
+            split_ticker = row['act_symbol']
+            split_date = pd.to_datetime(row['ex_date'])
+            
+            # --- RATIO CALCULATION (Same as before) ---
+            try:
+                tf = float(row.get('to_factor', 0))
+                ff = float(row.get('for_factor', 0))
+                if tf > 0 and ff > 0:
+                    ratio = tf / ff
+                else:
+                    ratio = float(row.get('ratio', 0))
+            except:
+                continue
+
+            if ratio <= 0 or ratio == 1.0:
+                continue
+
+            # --- VALIDATION (Scoped to Ticker) ---
+            # Isolate the data for THIS specific stock around the split date
+            # We assume data is sorted by date already
+            ticker_mask = ohlcv['act_symbol'] == split_ticker
+            
+            mask_pre = (ticker_mask) & (ohlcv['date'] < split_date)
+            mask_post = (ticker_mask) & (ohlcv['date'] >= split_date)
+            
+            # Validation logic: Check drop on this specific ticker
+            if mask_pre.any() and mask_post.any():
+                # Get the last close before split and first close after split for THIS ticker
+                prev_close = ohlcv.loc[mask_pre, 'close'].iloc[-1]
+                curr_close = ohlcv.loc[mask_post, 'close'].iloc[0]
+                
+                observed_drop = prev_close / curr_close
+                error_margin = abs(observed_drop - ratio) / ratio
+                
+                if error_margin > 0.25:
+                    # print(f"Skipping split for {split_ticker}: Price didn't drop.")
+                    continue
+
+            # --- APPLY ADJUSTMENT (Scoped to Ticker) ---
+            price_cols = ['open', 'high', 'low', 'close', 'prev_close']
+            
+            # Adjust Prices
+            for col in ohlcv.columns:
+                if col.lower() in price_cols:
+                    ohlcv.loc[mask_pre, col] = ohlcv.loc[mask_pre, col] / ratio
+            
+            # Adjust Volume
+            for col in ohlcv.columns:
+                if col.lower() == 'volume':
+                    ohlcv.loc[mask_pre, col] = ohlcv.loc[mask_pre, col] * ratio
+
+        self.stock_data["ohlcv"] = ohlcv
+
+    def calc_price_variables_batch(self):
+        '''
+        Calculates log returns, volatility, etc. using GroupBy 
+        to handle multiple stocks in one dataframe safely.
+        '''
+        if "ohlcv" not in self.stock_data: return
+
+        df = self.stock_data["ohlcv"]
+        
+        # Ensure sorting for correct shifting
+        df = df.sort_values(['act_symbol', 'date'])
+        
+        # 1. Basic Variables
+        # We use transform to keep the index aligned with the original dataframe
+        df['prev_close'] = df.groupby('act_symbol')['close'].shift(1)
+        
+        # Log Return: ln(close / prev_close)
+        df['log_ret'] = np.log(df['close'] / df['prev_close'])
+        
+        df['prev_ret'] = df.groupby('act_symbol')['log_ret'].shift(1)
+        
+        # 2. Rolling Variables (1, 5, 20 day returns)
+        # Note: 'rolling' with groupby requires a bit of care.
+        # We use apply() or operations on the grouped object.
+        
+        grouper = df.groupby('act_symbol')['log_ret']
+        
+        for length in [5, 20]:
+            # rolling().sum() inside transform is tricky, so we map it
+            # This is the standard pandas way for grouped rolling
+            df[f"{length}_day_log_ret"] = grouper.transform(lambda x: x.rolling(length).sum())
+
+        # 3. Volatility (20d)
+        df["20d_volatility"] = grouper.transform(lambda x: x.rolling(20).std())
+
+        self.stock_data["ohlcv"] = df
+
+    def get_batch_stock_data(self, stocks_list, start_date, end_date):
+        '''
+        Efficiently gets OHLCV for a list of stocks in ONE query
+        '''
+        if not stocks_list: return
+        
+        # Sanitize list for SQL
+        stocks_str = "', '".join([str(x) for x in stocks_list])
+        
+        # 1. Batch Pull OHLCV
+        # Important: Sort by Symbol then Date for the calculations later
+        query = f"""
+            SELECT * FROM stocks.ohlcv 
+            WHERE act_symbol IN ('{stocks_str}') 
+            AND date >= '{start_date}' AND date < '{end_date}'
+            ORDER BY act_symbol, date
+        """
+        self.stock_data = {}
+        self.stock_data["ohlcv"] = pd.read_sql(query, self.conn)
+        
+        # 2. Batch Pull Splits
+        split_query = f"""
+            SELECT * FROM stocks.split 
+            WHERE act_symbol IN ('{stocks_str}') 
+            AND ex_date >= '{start_date}' AND ex_date < '{end_date}'
+        """
+        self.stock_data["split"] = pd.read_sql(split_query, self.conn)
+        
+        # 3. Run the NEW Batch Logic
+        self.adjust_for_splits_batch()
+        self.calc_price_variables_batch()
+        
+        self.has_stock_data = True
+
 class FundamentalsVisualizer:
     def __init__(self, stocks, start_date, end_date):
         '''
