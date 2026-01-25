@@ -219,3 +219,4 @@ sample
 Data/ETFs.feather
 Data/universe_data.feather
 Data/all_training_data.feather
+*.feather
