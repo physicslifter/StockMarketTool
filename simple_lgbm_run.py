@@ -19,7 +19,7 @@ df = dr.stock_data["ohlcv"]
 #get feature data
 data_keys = ["prev_ret", 
                 #"days_since_release", 
-                "volume",
+                #"volume",
                 #"ROIC",
                 #"operating_margin",
                 #"FCF_margin",
