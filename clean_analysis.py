@@ -133,7 +133,7 @@ class TopLiquidityFilter(Filter):
 
     def apply(self, df, target_date):
         # 1. Define Calculation Window (Previous Month)
-        start_date = target_date - relativedelta(years = 1)
+        start_date = target_date - relativedelta(months = 1)
         
         # 2. Slice for Calculation ONLY (don't overwrite 'df' yet)
         # Note: 'df' is already reduced from previous filters, so this is fast.
@@ -155,24 +155,34 @@ class TopLiquidityFilter(Filter):
         return df[df['act_symbol'].isin(winners)].copy()
 
 class PriceFilter(Filter):
-    def __init__(self, min_price: float = 5.0):
+    def __init__(self, min_price: float = 5.0, method = "close_price"):
         super().__init__("price_filter")
+        valid_methods = ["close_price", "avg_price_over_last_year"]
+        if method not in valid_methods:
+            raise Exception(f"{method} is invalid. Must be one of {valid_methods}")
         self.min_price = min_price
+        self.method = method
 
     def apply(self, df, target_date):
         # Window: Previous Month
-        start_date = target_date - relativedelta(years = 1)
+        if self.method == "avg_price_over_last_year":
+            start_date = target_date - relativedelta(years = 1)
+
+            # Slice for calculation
+            calc_mask = (df['date'] >= start_date) & (df['date'] < target_date)
+            period_df = df.loc[calc_mask, ['act_symbol', 'close']]
         
-        # Slice for calculation
-        calc_mask = (df['date'] >= start_date) & (df['date'] < target_date)
-        period_df = df.loc[calc_mask, ['act_symbol', 'close']]
+            # Calculate
+            avg_prices = period_df.groupby('act_symbol')['close'].mean()
         
-        # Calculate
-        avg_prices = period_df.groupby('act_symbol')['close'].mean()
+            # Identify Winners
+            winners = avg_prices[avg_prices >= self.min_price].index.tolist()
         
-        # Identify Winners
-        winners = avg_prices[avg_prices >= self.min_price].index.tolist()
-        
+        else:
+            filter_df = df[df.date == df.date.max()]
+            winners = filter_df[filter_df.close > self.min_price]
+            winners = winners.act_symbol.tolist()
+            
         # Return reduced dataframe
         return df[df['act_symbol'].isin(winners)].copy()
 
@@ -182,7 +192,8 @@ class AdvancedStatsFilter(Filter):
                  min_history_days: int = None,
                  max_crash: float = None, 
                  require_uptrend: bool = None,
-                 volatility_n: int = None):
+                 volatility_n: int = None,
+                 ):
         """
         Args:
             min_history_days: Exclude stocks with history < N days (e.g. 252 for 1 yr).
@@ -199,6 +210,7 @@ class AdvancedStatsFilter(Filter):
     def apply(self, df, target_date):
         # 1. Window: Previous Year
         # We need at least 1 year for these stats to be meaningful
+        
         start_date = target_date - relativedelta(years=1)
         
         # 2. Slice for Calculation
@@ -264,10 +276,14 @@ class AdvancedStatsFilter(Filter):
         return df[df['act_symbol'].isin(winners)].copy()
 
 class Universe:
-    def __init__(self, master_df: pd.DataFrame):
+    def __init__(self, master_df: pd.DataFrame, filter_etfs:bool = True):
         # We store the master copy. We never modify this directly.
         self.master_df = master_df
         self.filters = []
+        if filter_etfs == True:
+            etf_data = pd.read_feather("Data/ETFs.feather")
+            etf_list = set(etf_data['act_symbol'].unique())
+            self.master_df = self.master_df[~self.master_df['act_symbol'].isin(etf_list)]
 
     def add_filter(self, filter: Filter):
         if not isinstance(filter, Filter):
@@ -285,11 +301,9 @@ class Universe:
         
         # 1. Start with a working copy of the master data
         # We must copy so we don't break the master for future runs
-        working_df = self.master_df.copy()
-        
+        working_df = self.master_df[(self.master_df.date > target_date - pd.DateOffset(years = 1)) & (self.master_df.date < target_date)]
         print(f"Generating universe for {target_date.date()}...")
         print(f"  -> Starting Count: {working_df['act_symbol'].nunique()}")
-
         # 2. Pipeline Loop
         #isolate data for the year and month we'rd on
         for f in self.filters:
@@ -303,9 +317,18 @@ class Universe:
             count = working_df['act_symbol'].nunique()
             print(f"  -> {f.name}: {count} stocks remaining")
 
+        survivors = working_df['act_symbol'].unique().tolist()
+        next_month = target_date + pd.DateOffset(months=1)
+        future_data = self.master_df[
+            (self.master_df['date'] >= target_date) & 
+            (self.master_df['date'] < next_month) & 
+            (self.master_df['act_symbol'].isin(survivors))
+        ].copy()
+
         # 3. Return final list of survivors
         #return working_df['act_symbol'].unique().tolist()
-        return working_df
+        print(target_date, working_df.date.min(), working_df.date.max())
+        return future_data
     
     def get_all_universe_data(self, 
                               save_name:str = None,
@@ -319,11 +342,12 @@ class Universe:
             data = self.master_df[(self.master_df.date >= dates[0]) & (self.master_df.date <= dates[1])]
         else:
             data = self.master_df
-        start_year = pd.Timestamp(data.date.values[0]).year + 1
+        start_year = pd.Timestamp(data.date.values[0]).year
         end_year = pd.Timestamp(data.date.values[-1]).year
         start_month = pd.Timestamp(data.date.values[0]).month
-        end_month = pd.Timestamp(data.date.values[-1]).year
-
+        end_month = pd.Timestamp(data.date.values[-1]).month
+        print(data)
+        print(start_year, end_year, start_month, end_month)
         years = range(start_year, end_year + 1)
         months = range(1, 13)
 
@@ -332,13 +356,16 @@ class Universe:
             for month in months:
                 if year == end_year and month > end_month:
                     break
-                month_data = self.get_universe_for_month(target_date = pd.Timestamp(year = year, month = month, day = 1))
-                all_data_as_list.append(month_data)
-                print(f"{year}-{month}-1 DATA RETRIEVED")
+                elif year == start_year and month < start_month:
+                    pass
+                else:
+                    month_data = self.get_universe_for_month(target_date = pd.Timestamp(year = year, month = month, day = 1))
+                    all_data_as_list.append(month_data)
+                    print(f"{year}-{month}-1 DATA RETRIEVED")
         final_df = pd.concat(all_data_as_list, ignore_index = True)
-        final_df = final_df.sort_values(by='Date', ascending=True)
+        final_df = final_df.sort_values(by='date', ascending=True)
         final_df = final_df.reset_index(drop=True)
-        if type(save_name != None):
+        if type(save_name) != type(None):
             extension = save_name.split(".")[-1]
             if extension == "csv":
                 final_df.to_csv(save_name)
