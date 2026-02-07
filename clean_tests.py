@@ -6,17 +6,27 @@ from clean_analysis import *
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 from pdb import set_trace as st
+from matplotlib import pyplot as plt
+
+plt.style.use('dark_background')
 
 #=====================================
 #Flags
 
 '''
 Filter tests
+
+test_top_liquidity_filter: demonstrates liquidity filter is working
+test_price_filter: demonstrates price filter is working
+test_advanced_stats_filter: demonstrates advanced stats filter is working
+test_universe: demonstrates that Universe() class works
+test_ta_lib: demonstrates TA-LIB functionality is working
 '''
-test_top_liquidity_filter = 0
+test_top_liquidity_filter = 0 
 test_price_filter = 0
 test_advanced_stats_filter = 0
-test_universe = 1
+test_universe = 0
+test_ta_lib = 1
 
 #=====================================
 #useful functions
@@ -79,3 +89,24 @@ if test_universe == True:
     test_universe_data = pd.read_feather("Data/test_training_universe.feather")
     test = test_universe_data.drop(columns = ["hurst_1y"])
     print(universe_data.equals(test))
+
+if test_ta_lib == True:
+    import talib
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = df[df.act_symbol == "F"]
+    ta_lib_sma = talib.SMA(df["close"]) #SMA FROM TA-LIB
+    upper, middle, lower = talib.BBANDS(df.close) #Bollinger Bands from ta-lib
+    fig = plt.figure(figsize = (9, 5))
+    ax1 = fig.add_subplot(1, 1, 1)
+    ax1.plot(df.date, df.close, c = "lime", label = "Close Price")
+    ax1.plot(df.date, ta_lib_sma, label = "SMA", c = "magenta", linestyle = ":")
+    ax1.plot(df.date, upper, label = "Upper BB", c = "orange", linestyle = "--")
+    ax1.plot(df.date, lower, label = "Lower BB", c = "orange", linestyle = "--")
+    ax1.plot(df.date, middle, label = "Middle BB", c = "goldenrod", linestyle = "--")
+    ax1.grid(True)
+    ax1.set_xlabel("Date")
+    ax1.set_ylabel("Price ($USD)")
+    ax1.legend()
+    ax1.set_title("Testing talib functions on F data")
+    plt.show()
+
