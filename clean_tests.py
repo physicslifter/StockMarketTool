@@ -74,8 +74,8 @@ if test_universe == True:
     ]
     universe = Universe(master_df = df)
     universe.add_filters(filters)
-    universe_data = universe.get_all_universe_data()
-    test_universe_data = pd.read_feather("Data/v5_training_universe.feather")
-    st()
-
-
+    dates = [pd.Timestamp("2020-01-01"), pd.Timestamp("2021-01-01")]
+    universe_data = universe.get_all_universe_data(dates = dates)
+    test_universe_data = pd.read_feather("Data/test_training_universe.feather")
+    test = test_universe_data.drop(columns = ["hurst_1y"])
+    print(universe_data.equals(test))
