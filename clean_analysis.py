@@ -18,48 +18,6 @@ import numpy as np
 from joblib import Parallel, delayed
 from dateutil.relativedelta import relativedelta
 
-'''#helper function for advanced stats filter
-def calculate_metrics_single(ticker, prices):
-    """
-    Calculates Hurst, Annual Return, and Volatility for a single ticker.
-    Input: Array of 1 year of daily close prices.
-    Output: (ticker, hurst_value, annual_return, volatility, last_price)
-    """
-    if len(prices) < 30: 
-        return (ticker, np.nan, np.nan, np.nan, np.nan)
-    
-    current_price = prices[-1]
-    
-    # 1. Calculate Annual Return (Momentum check for "trending to 0")
-    annual_ret = (current_price / prices[0]) - 1
-    
-    # 2. Calculate Annualized Volatility (Standard Deviation of Log Returns)
-    # used for the "Stability" filter
-    try:
-        log_rets = np.diff(np.log(prices))
-        # Annualized Vol (assuming daily data)
-        volatility = np.std(log_rets) * np.sqrt(252)
-    except:
-        volatility = np.nan
-
-    # 3. Calculate Hurst Exponent
-    try:
-        log_prices = np.log(prices)
-        lags = range(2, 20) # Lags to test
-        
-        # Volatility calculation: std(t) ~ t^H
-        tau = [np.sqrt(np.std(np.subtract(log_prices[lag:], log_prices[:-lag]))) for lag in lags]
-        
-        # Avoid log(0) error
-        tau = [t if t > 0 else 1e-8 for t in tau]
-        
-        # Slope of log-log plot
-        hurst = np.polyfit(np.log(lags), np.log(tau), 1)[0]
-    except:
-        hurst = np.nan
-        
-    return (ticker, hurst, annual_ret, volatility, current_price)'''
-
 def calculate_metrics_single(ticker, prices):
     """
     Calculates metrics for AdvancedStatsFilter.
@@ -179,10 +137,12 @@ class PriceFilter(Filter):
             winners = avg_prices[avg_prices >= self.min_price].index.tolist()
         
         else:
-            filter_df = df[df.date == df.date.max()]
-            winners = filter_df[filter_df.close > self.min_price]
-            winners = winners.act_symbol.tolist()
-            
+            #filter_df = df[df.date == df.date.max()]
+            #winners = filter_df[filter_df.close > self.min_price]
+            #winners = winners.act_symbol.tolist()
+            last_prices = df.sort_values('date').groupby('act_symbol')['close'].last()
+            winners = last_prices[last_prices >= self.min_price].index.tolist()
+
         # Return reduced dataframe
         return df[df['act_symbol'].isin(winners)].copy()
 
@@ -234,6 +194,9 @@ class AdvancedStatsFilter(Filter):
         # Unpack the 7 values returned by the helper
         for ticker, hurst, ann_ret, vol, price, is_uptrend, history_len in results:
             
+            if np.isnan(hurst) or np.isnan(vol):
+                continue
+
             # CHECK 1: Min History (Avoid IPOs)
             if self.min_history is not None:
                 if history_len < self.min_history:
@@ -301,7 +264,7 @@ class Universe:
         
         # 1. Start with a working copy of the master data
         # We must copy so we don't break the master for future runs
-        working_df = self.master_df[(self.master_df.date > target_date - pd.DateOffset(years = 1)) & (self.master_df.date < target_date)]
+        working_df = self.master_df[(self.master_df.date >= target_date - pd.DateOffset(years = 1)) & (self.master_df.date < target_date)]
         print(f"Generating universe for {target_date.date()}...")
         print(f"  -> Starting Count: {working_df['act_symbol'].nunique()}")
         # 2. Pipeline Loop
@@ -363,7 +326,7 @@ class Universe:
                     all_data_as_list.append(month_data)
                     print(f"{year}-{month}-1 DATA RETRIEVED")
         final_df = pd.concat(all_data_as_list, ignore_index = True)
-        final_df = final_df.sort_values(by='date', ascending=True)
+        final_df = final_df.sort_values(by=['act_symbol', 'date'], ascending=True)
         final_df = final_df.reset_index(drop=True)
         if type(save_name) != type(None):
             extension = save_name.split(".")[-1]
