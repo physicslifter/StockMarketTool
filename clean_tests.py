@@ -7,6 +7,7 @@ import pandas as pd
 from dateutil.relativedelta import relativedelta
 from pdb import set_trace as st
 from matplotlib import pyplot as plt
+from Features import *
 
 plt.style.use('dark_background')
 
@@ -21,12 +22,14 @@ test_price_filter: demonstrates price filter is working
 test_advanced_stats_filter: demonstrates advanced stats filter is working
 test_universe: demonstrates that Universe() class works
 test_ta_lib: demonstrates TA-LIB functionality is working
+test_basic_feature: tests the log return feature
 '''
 test_top_liquidity_filter = 0 
 test_price_filter = 0
 test_advanced_stats_filter = 0
 test_universe = 0
-test_ta_lib = 1
+test_ta_lib = 0
+test_basic_feature = 1
 
 #=====================================
 #useful functions
@@ -94,12 +97,14 @@ if test_ta_lib == True:
     import talib
     df = pd.read_feather("Data/all_ohlcv.feather")
     df = df[df.act_symbol == "F"]
-    ta_lib_sma = talib.SMA(df["close"]) #SMA FROM TA-LIB
+    ta_lib_sma = talib.SMA(df["close"], timeperiod = 30) #SMA FROM TA-LIB
     upper, middle, lower = talib.BBANDS(df.close) #Bollinger Bands from ta-lib
     fig = plt.figure(figsize = (9, 5))
     ax1 = fig.add_subplot(1, 1, 1)
     ax1.plot(df.date, df.close, c = "lime", label = "Close Price")
-    ax1.plot(df.date, ta_lib_sma, label = "SMA", c = "magenta", linestyle = ":")
+    ax1.plot(df.date, ta_lib_sma, label = "30 day SMA", c = "magenta", linestyle = ":")
+    ta_lib_sma = talib.SMA(df["close"], timeperiod = 200) #SMA FROM TA-LIB
+    ax1.plot(df.date, ta_lib_sma, label = "200 day SMA", c = "teal", linestyle = ":")
     ax1.plot(df.date, upper, label = "Upper BB", c = "orange", linestyle = "--")
     ax1.plot(df.date, lower, label = "Lower BB", c = "orange", linestyle = "--")
     ax1.plot(df.date, middle, label = "Middle BB", c = "goldenrod", linestyle = "--")
@@ -109,4 +114,41 @@ if test_ta_lib == True:
     ax1.legend()
     ax1.set_title("Testing talib functions on F data")
     plt.show()
+
+if test_basic_feature == True:
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    df.reset_index(drop = True)
+    feature = LogReturn(-5)
+    feature_df = feature.retrieve_data(df)
+    print(df.head(10))
+    print(feature.is_feature)
+    target = LogReturn(5)
+    target_df = target.retrieve_data(df)
+    print(df.tail(10))
+    print(target.is_feature)
+    volatility_target = Volatility(5)
+    volatility_target.retrieve_data(df)
+    print(df.tail(10))
+    print("getting sub df...")
+    sub_df = df[(df.date >= pd.Timestamp(year = 2020, month = 1, day = 1)) & 
+                (df.date <= pd.Timestamp(year = 2020, month = 1, day = 30)) &
+                (df.act_symbol == "PFE")
+                ]
+    print("DONE")
+    fig = plt.figure()
+    price_ax = fig.add_subplot(1, 1, 1)
+    log_ret_ax = price_ax.twinx()
+    log_ret_ax.plot(sub_df.date, sub_df.log_ret_5d_F, label = "5 day lagging log returns")
+    log_ret_ax.plot(sub_df.date, sub_df.log_ret_5d_T, label = "5 day future log returns")
+    price_ax.plot(sub_df.date, sub_df.close, label = "close price", c = "magenta")
+    price_ax.set_xlabel("Date")
+    price_ax.set_ylabel("Price (USD)")
+    log_ret_ax.set_ylabel("Log ret")
+    price_ax.set_title("PFE log returns & price from Feature()")
+    for ax, loc in zip([price_ax, log_ret_ax], ["upper-left", "upper-right"]):
+        ax.legend()
+    plt.show()
+
+
 
