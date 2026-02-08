@@ -22,14 +22,17 @@ test_price_filter: demonstrates price filter is working
 test_advanced_stats_filter: demonstrates advanced stats filter is working
 test_universe: demonstrates that Universe() class works
 test_ta_lib: demonstrates TA-LIB functionality is working
-test_basic_feature: tests the log return feature
+test_basic_features: tests the log return feature & volatility
+test_talib_feature: tests general talib feature class to generate talib features/target
+    performs on SMA
 '''
 test_top_liquidity_filter = 0 
 test_price_filter = 0
 test_advanced_stats_filter = 0
 test_universe = 0
 test_ta_lib = 0
-test_basic_feature = 1
+test_basic_features = 0
+test_talib_feature = 1
 
 #=====================================
 #useful functions
@@ -115,7 +118,7 @@ if test_ta_lib == True:
     ax1.set_title("Testing talib functions on F data")
     plt.show()
 
-if test_basic_feature == True:
+if test_basic_features == True:
     df = pd.read_feather("Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     df.reset_index(drop = True)
@@ -130,25 +133,54 @@ if test_basic_feature == True:
     volatility_target = Volatility(5)
     volatility_target.retrieve_data(df)
     print(df.tail(10))
+    volatility_feature = Volatility(-5)
+    volatility_feature.retrieve_data(df)
     print("getting sub df...")
     sub_df = df[(df.date >= pd.Timestamp(year = 2020, month = 1, day = 1)) & 
                 (df.date <= pd.Timestamp(year = 2020, month = 1, day = 30)) &
                 (df.act_symbol == "PFE")
                 ]
     print("DONE")
-    fig = plt.figure()
-    price_ax = fig.add_subplot(1, 1, 1)
+    fig = plt.figure(figsize = (10, 5))
+    price_ax = fig.add_subplot(1, 2, 1)
+    price_ax2 = fig.add_subplot(1, 2, 2)
     log_ret_ax = price_ax.twinx()
+    volatility_ax = price_ax2.twinx()
     log_ret_ax.plot(sub_df.date, sub_df.log_ret_5d_F, label = "5 day lagging log returns")
     log_ret_ax.plot(sub_df.date, sub_df.log_ret_5d_T, label = "5 day future log returns")
-    price_ax.plot(sub_df.date, sub_df.close, label = "close price", c = "magenta")
+    volatility_ax.plot(sub_df.date, sub_df.volatility_5d_T, label = "Volatility 5 day future returns")
+    volatility_ax.plot(sub_df.date, sub_df.volatility_5d_F, label = "Lagging 5 day volatility")
+    for ax in [price_ax, price_ax2]:
+        ax.plot(sub_df.date, sub_df.close, label = "close price", c = "magenta")
     price_ax.set_xlabel("Date")
     price_ax.set_ylabel("Price (USD)")
     log_ret_ax.set_ylabel("Log ret")
-    price_ax.set_title("PFE log returns & price from Feature()")
-    for ax, loc in zip([price_ax, log_ret_ax], ["upper-left", "upper-right"]):
-        ax.legend()
+    fig.suptitle("Testing 1st 2 classes in Feature()")
+    price_ax.set_title("Log ret")
+    price_ax2.set_title("Volatility")
+    for ax1, ax2 in (zip([price_ax, log_ret_ax], [price_ax2, volatility_ax])):
+        for ax, loc in zip([ax1, ax2], ["upper-left", "upper-right"]):
+            ax.legend()
+    print(sub_df)
+    plt.tight_layout()
     plt.show()
 
+if test_talib_feature == True:
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    df.reset_index(drop = True)
+    #get 5 day lag 50 day SMA as a feature
+    Feature = TALibVar(name = "SMA", num_days = -5, timeperiod = 50)
+    #get 5 day lookahead 50 day SMA as a target
+    Target = TALibVar(name = "SMA", num_days = 5, timeperiod = 50)
+    for var in [Feature, Target]:
+        var.retrieve_data(df)
+    print("getting sub df...")
+    sub_df = df[(df.date >= pd.Timestamp(year = 2020, month = 1, day = 1)) & 
+                (df.date <= pd.Timestamp(year = 2020, month = 1, day = 30)) &
+                (df.act_symbol == "PFE")
+                ]
+    print("DONE")
+    print(sub_df)
 
 
