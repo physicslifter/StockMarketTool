@@ -18,7 +18,9 @@ valid_targets = ["log_ret",
                  ]
 
 talib_functions = {
-    "SMA": talib.SMA
+    "SMA": talib.SMA,
+    "EMA": talib.EMA,
+    "bollinger": talib.BBANDS
 }
 
 def test_valid_df(df):
@@ -78,7 +80,8 @@ class Variable:
     
     def get_detailed_name(self):
         appendix = "T" if self.is_feature == False else "F"
-        self.detailed_name = f"{self.name}_{np.abs(self.num_days)}d_{appendix}"
+        penultimate_appendix = "" if self.name in talib_functions.keys() else f"_{np.abs(self.num_days)}d_"
+        self.detailed_name = f"{self.name}{penultimate_appendix}{appendix}"
     
 class LogReturn(Variable):
     def __init__(self, num_days):
@@ -138,7 +141,7 @@ class TALibVar(Variable):
         else:
             result = result.groupby(df["act_symbol"]).shift(1)
         return result"""'''
-class TALibVar(Variable):
+class TALibVarTimePeriod(Variable):
     def __init__(self, name, num_days, timeperiod):
         # num_days: How far to shift (e.g., -5 for 5-day lag, +5 for 5-day future target)
         super().__init__(name, num_days)
@@ -178,13 +181,135 @@ class TALibVar(Variable):
 
             return series.shift(-num_days)
 
+        #if log_ret not in dataframe, add it
+        if "log_ret" not in df.keys():
+            df["log_ret"] = np.log(df["close"] / df.close.shift(1))
+
         # Apply to each stock individually
-        result = df.groupby("act_symbol")["close"].transform(calculate_and_shift)
+        result = df.groupby("act_symbol")["log_ret"].transform(calculate_and_shift)
         
         return result
 
-    
+#bollinger bands from talib
+class BollingerBands(TALibVarTimePeriod):
+    def __init__(self, num_days, timeperiod=20, nbdevup=2, nbdevdn=2):
+        super().__init__("BBANDS", num_days, timeperiod)
+        self.nbdevup = nbdevup
+        self.nbdevdn = nbdevdn
 
-
-
+    def retrieve_data(self, df, return_data: bool = False):
+        # 1. Standard Validation & Sorting (Inherited logic)
+        if test_valid_df(df) == False:
+            raise Exception("DataFrame is invalid")
         
+        if not df.attrs.get("is_sorted_by_symbol_date", False):
+            df.sort_values(by=["act_symbol", "date"], inplace=True)
+            df.attrs["is_sorted_by_symbol_date"] = True
+
+        # 2. Ensure Log Returns exist
+        if "log_ret" not in df.keys():
+            df["log_ret"] = np.log(df["close"] / df.close.shift(1))
+
+        # 3. Generate the base name (e.g. BBANDS_20_5d_F)
+        self.get_detailed_name()
+
+        # 4. Define the calculation logic
+        def calculate_bands(x):
+            # x is the log_ret series for a single stock
+            try:
+                u, m, l = talib.BBANDS(x.astype(float).values, 
+                                       timeperiod=self.timeperiod,
+                                       nbdevup=self.nbdevup, 
+                                       nbdevdn=self.nbdevdn)
+                # Convert to Series to keep index alignment
+                u = pd.Series(u, index=x.index)
+                m = pd.Series(m, index=x.index)
+                l = pd.Series(l, index=x.index)
+            except Exception:
+                nan_s = pd.Series([np.nan] * len(x), index=x.index)
+                u, m, l = nan_s, nan_s, nan_s
+
+            # 5. Apply Shifting (Must match TALibVarTimePeriod logic)
+            if self.num_days < 0: 
+                # FEATURE: Shift 1 (avoid lookahead) + Shift lag
+                # If num_days is -5, we shift(1) then shift(5)
+                u = u.shift(1).shift(-self.num_days)
+                m = m.shift(1).shift(-self.num_days)
+                l = l.shift(1).shift(-self.num_days)
+            else: 
+                # TARGET: Shift backward (future data)
+                u = u.shift(-self.num_days)
+                m = m.shift(-self.num_days)
+                l = l.shift(-self.num_days)
+
+            return pd.DataFrame({'u': u, 'm': m, 'l': l})
+
+        # 6. Apply to Groupby
+        # This returns a DataFrame with MultiIndex (act_symbol, original_index)
+        results = df.groupby("act_symbol")["log_ret"].apply(calculate_bands)
+
+        # 7. Add columns to DataFrame
+        # We use .values to bypass index misalignment, relying on the fact that 
+        # df and results are sorted identically by symbol/date.
+        df[f"{self.detailed_name}_upper"] = results['u'].values
+        df[f"{self.detailed_name}_middle"] = results['m'].values
+        df[f"{self.detailed_name}_lower"] = results['l'].values
+
+        if return_data:
+            return df
+        
+class BollingerBandsNormalized(TALibVarTimePeriod):
+    def __init__(self, num_days, timeperiod=20, nbdevup=2, nbdevdn=2, pct_B:bool = True, width:bool = True):
+        super().__init__("BBANDS_Norm", num_days, timeperiod)
+        self.nbdevup = nbdevup
+        self.nbdevdn = nbdevdn
+        self.width = width
+        self.pct_B = pct_B
+
+    def retrieve_data(self, df, return_data: bool = False):
+        # ... validation code ...
+        
+        self.get_detailed_name()
+
+        # 1. Use PRICE, not Log Returns
+        def calculate_percent_b(x):
+            try:
+                u, m, l = talib.BBANDS(x.astype(float).values, 
+                                       timeperiod=self.timeperiod, 
+                                       nbdevup=self.nbdevup, 
+                                       nbdevdn=self.nbdevdn)
+                u = pd.Series(u, index=x.index)
+                l = pd.Series(l, index=x.index)
+                
+                # Calculate %B (Normalized Position)
+                # Avoid division by zero
+                width = u - l
+                width[width == 0] = np.nan 
+                
+                percent_b = (x - l) / width
+                
+                # Also return Bandwidth (Vol measure)
+                bandwidth = width / m
+                
+            except Exception:
+                percent_b = pd.Series([np.nan] * len(x), index=x.index)
+                bandwidth = pd.Series([np.nan] * len(x), index=x.index)
+
+            # Shift Logic (Feature vs Target)
+            if self.num_days < 0:
+                percent_b = percent_b.shift(1).shift(-self.num_days)
+                bandwidth = bandwidth.shift(1).shift(-self.num_days)
+            else:
+                percent_b = percent_b.shift(-self.num_days)
+                bandwidth = bandwidth.shift(-self.num_days)
+
+            return pd.DataFrame({'pct_b': percent_b, 'width': bandwidth})
+
+        results = df.groupby("act_symbol")["close"].apply(calculate_percent_b)
+
+        if self.pct_B == True:
+            df[f"{self.detailed_name}_pct_b"] = results['pct_b'].values
+        if self.width == True:
+            df[f"{self.detailed_name}_width"] = results['width'].values
+        
+        if return_data: return df
