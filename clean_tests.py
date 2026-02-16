@@ -8,6 +8,9 @@ from dateutil.relativedelta import relativedelta
 from pdb import set_trace as st
 from matplotlib import pyplot as plt
 from Features import *
+#from FeatureEngine import *
+from FeatureEngine import *
+import math
 
 plt.style.use('dark_background')
 
@@ -28,15 +31,29 @@ test_talib_feature: tests general talib feature class to generate talib features
 test_bbands: test for bollinger bands feature
 test_bbands_normalized: Gets normalized width and (close price - lower band)/width 
 '''
+
+#tests for clean_analysis.py
 test_top_liquidity_filter = 0 
 test_price_filter = 0
 test_advanced_stats_filter = 0
 test_universe = 0
+
+#tests for Features.py
 test_ta_lib = 0
 test_basic_features = 0
 test_talib_feature = 0
 test_bbands = 0
-test_bbands_normalized = 1
+test_bbands_normalized = 0
+test_momentum = 0
+
+#tests for FeatureEngine.py
+test_feature_engine = 0
+test_feature_engine2 = 0
+test_liquidity = 0
+test_MA_crossover = 0
+test_hurst_autocorr = 0
+test_BETA = 0 #test for pandas BETA feature
+test_vwap_zscore = 1
 
 #=====================================
 #useful functions
@@ -311,3 +328,627 @@ if test_bbands_normalized == True:
     plt.suptitle(f"Normalized Bollinger Bands Feature Test ({bb_norm.timeperiod} period)")
     plt.tight_layout()
     plt.show()
+
+if test_momentum == True:
+    print("\n========================================")
+    print("Testing Momentum Feature (Log Price Trend)")
+    print("========================================")
+    
+    # 1. Load Data
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    
+    # 2. Instantiate the Class
+    # We request a 20-day Momentum, lagged by 5 days
+    # Expected Logic: 
+    #   1. Calculate 20-day change in Log Price (Trend)
+    #   2. Shift 1 day (because it's a feature, must be known at Open)
+    #   3. Shift 5 days (the requested lag)
+    #   Total Shift = 6 days
+    LAG_DAYS = -5
+    TIMEPERIOD = 20
+    
+    mom_feature = TALibVarTimePeriod(name="momentum", 
+                                     num_days=LAG_DAYS, 
+                                     timeperiod=TIMEPERIOD, 
+                                     train_on_log=True)
+    
+    # 3. Run Calculation
+    print(f"Generating feature: {mom_feature.name} (Timeperiod: {TIMEPERIOD}, Lag: {LAG_DAYS})...")
+    mom_feature.retrieve_data(df)
+    
+    col_name = mom_feature.detailed_name 
+    print(f"Column created: {col_name}")
+
+    # 4. Validation (Manual Calculation)
+    symbol = "AAPL"
+    # Filter for symbol and sort to ensure shifts work
+    mask = df['act_symbol'] == symbol
+    sub_df = df.loc[mask].copy().sort_values("date")
+    
+    # A: Calculate Log Price
+    log_price = np.log(sub_df['close'])
+    
+    # B: Calculate Momentum (Log Price - Log Price t-20)
+    # This represents the cumulative log return over the period
+    manual_mom = log_price - log_price.shift(TIMEPERIOD)
+    
+    # C: Apply Shifts
+    # Shift 1 for "Feature Availability" (standard in your class for num_days < 0)
+    # Shift abs(LAG_DAYS) for the requested specific lag
+    total_shift = 1 + abs(LAG_DAYS)
+    manual_mom = manual_mom.shift(total_shift)
+    
+    # 5. Compare
+    comparison = pd.DataFrame({
+        'Date': sub_df['date'],
+        'Class_Output': sub_df[col_name],
+        'Manual_Calc': manual_mom,
+        'Close_Price': sub_df['close']
+    }).dropna().tail(10)
+    
+    print("\n--- Comparison Table (Last 10 rows) ---")
+    print(comparison)
+    
+    # Check for equality (ignoring NaNs at the start)
+    # We use the full series for the check, not just the tail
+    valid_indices = ~np.isnan(manual_mom)
+    are_close = np.allclose(sub_df.loc[valid_indices, col_name], 
+                            manual_mom[valid_indices], 
+                            equal_nan=True)
+    
+    if are_close:
+        print("\n[SUCCESS] Class momentum matches manual Log Price momentum.")
+        print(f"Verifies: ln(P_t) - ln(P_t-{TIMEPERIOD}) shifted by {total_shift} days.")
+    else:
+        print("\n[FAILURE] Values do not match.")
+        print("Possible causes:")
+        print("1. Class is using daily returns (acceleration) instead of log price.")
+        print("2. Groupby/Shift logic is misaligned.")
+
+if test_feature_engine == True:
+    print("\n========================================")
+    print("Testing Unified Feature Engine (Transforms in Requests)")
+    print("========================================")
+    
+    # 1. Load Data
+    try:
+        df = pd.read_feather("Data/all_ohlcv.feather")
+        df["date"] = pd.to_datetime(df["date"])
+        df = df[df['date'] >= "2020-01-01"].copy()
+    except Exception as e:
+        print(f"Data load error: {e}")
+        exit()
+
+    # 2. Define Requests with TRANSFORMS
+    requests = []
+    
+    # A. Standard Features
+    requests.append(FeatureRequest(name='SLOPE', params={'timeperiod': 20}, shift=-1, input_type='log_price', alias='trend_slope'))
+    
+    # B. Cross-Sectional Feature: Rank of Slope
+    # Note: This will calculate the slope (base) internally, then rank it. 
+    # The output column will be trend_slope_20d_F_RANK
+    requests.append(FeatureRequest(name='SLOPE', params={'timeperiod': 20}, shift=-1, input_type='log_price', alias='trend_slope', transform='rank'))
+    
+    # C. Z-Score (Custom Stat)
+    requests.append(FeatureRequest(name='ZSCORE', params={'timeperiod': 20}, shift=-1, input_type='log_ret', alias='vol_zscore'))
+    
+    # D. Velocity
+    requests.append(FeatureRequest(name='RSI', params={'timeperiod': 14}, shift=-1, deriv_order=1, alias='RSI_velocity'))
+    
+    # E. Targets (Future Return)
+    # 1. Binary Target (Positive/Negative return)
+    requests.append(FeatureRequest(name='SUM', params={'timeperiod': 5}, shift=5, input_type='log_ret', alias='target_5d', transform='binary'))
+    
+    # 2. Regime Target (High/Low/Neutral)
+    requests.append(FeatureRequest(name='SUM', params={'timeperiod': 5}, shift=5, input_type='log_ret', alias='target_5d', transform='regime', transform_params={'threshold': 0.02}))
+
+    # 3. Run Engine (Everything happens here now)
+    engine = FeatureEngine(requests)
+    df = engine.compute(df)
+    
+    # 4. Verify Data
+    print("\n--- Columns Created ---")
+    # Helper to see what we made
+    ignore = ['open','high','low','close','volume','log_close','log_high','log_low','log_ret','act_symbol', 'gap_size', 'log_volume']
+    cols_created = [c for c in df.columns if c not in ignore]
+    print(cols_created)
+    
+    # Check specific transformed columns
+    print("\nSample Data (Slope Rank & Binary Target):")
+    print(df[['date', 'act_symbol', 'trend_slope_20d_F_RANK', 'target_5d_5d_T_BINARY']].tail())
+    
+    # Pick a symbol
+    symbol = "AAPL"
+    if symbol not in df['act_symbol'].values:
+        symbol = df['act_symbol'].unique()[0]
+    
+    # Filter Data (Last 1 Year of available data)
+    mask = (df['act_symbol'] == symbol)
+    sub_df = df.loc[mask].copy().sort_values('date').tail(252)
+    
+    # Define columns to plot (exclude OHLC and intermediate calcs)
+    feature_cols = [c for c in df.keys() if "F" in c.split("_")]
+    
+    # Calculate Rows/Cols
+    num_feats = len(feature_cols)
+    ncols = 3
+    nrows = math.ceil(num_feats / ncols)
+    
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(18, 4 * nrows), constrained_layout=True)
+    axes_flat = axes.flatten()
+    
+    for i, col in enumerate(feature_cols):
+        ax = axes_flat[i]
+        
+        # 1. Twin Axis for Price (Context)
+        ax_price = ax.twinx()
+        ax_price.plot(sub_df['date'], sub_df['close'], color='white', linewidth=1, label='Price')
+        ax_price.set_yticks([]) # Hide price labels
+        
+        # 2. Color Logic
+        color = 'cyan'           # Default Feature
+        if "_T" in col or "target" in col: 
+            color = 'magenta'    # Target
+        elif "rank" in col: 
+            color = 'lime'       # Rank/Cross-sectional
+        elif "zscore" in col:
+            color = 'yellow'     # Stats
+
+        # 3. Plot Feature
+        # Use simple line plot for most, scatter for binary targets
+        if "binary" in col or "regime" in col:
+            ax.step(sub_df['date'], sub_df[col], where='post', color=color, linewidth=1.5)
+            ax.set_yticks([-1, 0, 1])
+        else:
+            ax.plot(sub_df['date'], sub_df[col], color=color, linewidth=1.5)
+            # Add zero line for oscillators
+            if "velocity" in col or "slope" in col or "zscore" in col:
+                ax.axhline(0, color='white', linestyle=':', alpha=0.3)
+        
+        # 4. Styling
+        ax.set_title(col, fontsize=10, fontweight='bold', color=color)
+        ax.grid(True, alpha=0.2, linestyle=':')
+        
+        # X-Axis formatting
+        if i >= num_feats - ncols:
+            ax.tick_params(axis='x', rotation=45, labelsize=8)
+        else:
+            ax.set_xticklabels([])
+
+    # Turn off empty subplots
+    for j in range(i + 1, len(axes_flat)):
+        axes_flat[j].axis('off')
+
+    plt.suptitle(f"New Feature Analysis: {symbol}", fontsize=16, y=1.02)
+    plt.show()
+
+    st()
+
+if test_feature_engine2 == True:
+    print("\n========================================")
+    print("Testing Unified Feature Engine + SPREAD_AR (Candlesticks)")
+    print("========================================")
+    
+    # 1. Load Data
+    try:
+        df = pd.read_feather("Data/all_ohlcv.feather")
+        df["date"] = pd.to_datetime(df["date"])
+        # Filter for a specific date range
+        df = df[df['date'] >= "2020-01-01"].copy()
+    except Exception as e:
+        print(f"Data load error: {e}")
+        exit()
+
+    # 2. Define Requests
+    requests = []
+    
+    # --- LIQUIDITY ---
+    # Abdi-Ranaldo Spread (Corrected Math)
+    requests.append(FeatureRequest(name='SPREAD_AR', params={'timeperiod': 20}, shift=-1, alias='spread'))
+    
+    # --- VOLATILITY ---
+    requests.append(FeatureRequest(name='ZSCORE', params={'timeperiod': 20}, shift=-1, input_type='log_ret', alias='vol_zscore'))
+    
+    # --- TREND ---
+    requests.append(FeatureRequest(name='SLOPE', params={'timeperiod': 20}, shift=-1, input_type='log_price', alias='trend_slope'))
+    
+    # --- TRANSFORMS ---
+    requests.append(FeatureRequest(name='SPREAD_AR', params={'timeperiod': 20}, shift=-1, alias='spread', transform='rank'))
+    
+    # --- TARGETS ---
+    requests.append(FeatureRequest(name='SUM', params={'timeperiod': 5}, shift=5, input_type='log_ret', alias='target_5d', transform='binary'))
+
+    # 3. Run Engine
+    print(f"Computing {len(requests)} features...")
+    engine = FeatureEngine(requests)
+    df = engine.compute(df)
+    
+    # 4. Verify Data
+    ignore = ['open','high','low','close','volume','log_close','log_high','log_low','log_ret','act_symbol', 'gap_size', 'log_volume', 'CAL_MONTH', 'CAL_DOW', 'CAL_QUARTER', 'CAL_DAY']
+    cols_created = [c for c in df.columns if c not in ignore]
+    
+    print("\n--- Features Created ---")
+    print(cols_created)
+    
+    # =========================================================
+    # 5. GRID PLOT VISUALIZATION (CANDLESTICK EDITION)
+    # =========================================================
+    print("\nGenerating Visualization with Candlesticks...")
+    
+    # Pick a symbol
+    symbol = "AAPL"
+    if symbol not in df['act_symbol'].values:
+        symbol = df['act_symbol'].unique()[0]
+    
+    # Filter Data (Last 150 days for better candle visibility)
+    mask = (df['act_symbol'] == symbol)
+    sub_df = df.loc[mask].copy().sort_values('date').tail(150)
+    
+    # Define columns to plot
+    feature_cols = [key for key in sub_df.keys() if "F" in key.split("_")]
+    
+    # Layout Logic
+    num_feats = len(feature_cols)
+    ncols = 3
+    nrows = math.ceil(num_feats / ncols)
+    
+    fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(18, 4 * nrows), constrained_layout=True)
+    axes_flat = axes.flatten()
+    
+    for i, col in enumerate(feature_cols):
+        ax = axes_flat[i]
+        
+        # --- 1. PLOT CANDLESTICKS (Background) ---
+        ax_price = ax.twinx()
+        
+        # Split into Up and Down days
+        up = sub_df[sub_df.close >= sub_df.open]
+        down = sub_df[sub_df.close < sub_df.open]
+        
+        # Plot Wicks (High to Low)
+        ax_price.vlines(up.date, up.low, up.high, color='dimgray', linewidth=0.8, alpha=0.6)
+        ax_price.vlines(down.date, down.low, down.high, color='dimgray', linewidth=0.8, alpha=0.6)
+        
+        # Plot Bodies (Open to Close)
+        # Note: Using bar width relative to days. 0.6 is a good standard width.
+        ax_price.bar(up.date, up.close - up.open, bottom=up.open, width=0.6, color='green', alpha=0.3)
+        ax_price.bar(down.date, down.close - down.open, bottom=down.open, width=0.6, color='red', alpha=0.3)
+        
+        # Hide Y-ticks for price to keep it clean (context only)
+        ax_price.set_yticks([]) 
+        
+        # --- 2. PLOT FEATURE (Foreground) ---
+        # Color Logic
+        color = 'cyan'           # Default
+        if "target" in col or "_T" in col: 
+            color = 'magenta'    # Target
+        elif "RANK" in col: 
+            color = 'lime'       # Rank
+        elif "spread" in col:
+            color = 'orange'     # Liquidity
+        elif "zscore" in col:
+            color = 'yellow'     # Volatility
+
+        # Plot Feature Line / Step
+        if "binary" in col or "regime" in col:
+            ax.step(sub_df['date'], sub_df[col], where='post', color=color, linewidth=2)
+            ax.set_yticks([-1, 0, 1])
+        else:
+            ax.plot(sub_df['date'], sub_df[col], color=color, linewidth=1.5)
+            # Add Zero Line
+            if "zscore" in col or "slope" in col or "spread" in col:
+                ax.axhline(0, color='white', linestyle=':', alpha=0.5)
+        
+        # Styling
+        ax.set_title(col, fontsize=10, fontweight='bold', color=color)
+        ax.grid(True, alpha=0.2, linestyle=':')
+        
+        # X-Axis labels only on bottom row
+        if i >= num_feats - ncols:
+            ax.tick_params(axis='x', rotation=45, labelsize=8)
+        else:
+            ax.set_xticklabels([])
+
+    # Hide unused subplots
+    for j in range(i + 1, len(axes_flat)):
+        axes_flat[j].axis('off')
+
+    plt.suptitle(f"Feature Analysis: {symbol} (Candlestick View)", fontsize=16, y=1.02)
+    plt.show()
+
+    st()
+
+if test_liquidity == True:
+    #get data
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+
+    #compute features
+    liquidity_feature = FeatureRequest(name='SPREAD_AR', params={'timeperiod': 1}, shift=-1, alias='liquidity')
+    feature_engine = FeatureEngine([liquidity_feature])
+    df = feature_engine.compute(df)
+
+    #get AAPL data to show for the test
+    symbol = "F"
+    if symbol not in df['act_symbol'].values:
+        symbol = df['act_symbol'].unique()[0]
+    mask = (df['act_symbol'] == symbol)
+    sub_df = df.loc[mask].copy().sort_values('date').tail(252)
+
+    print(sub_df.keys())
+    liquidity_key = [key for key in sub_df.keys() if "F" in key.split("_")][0]
+    fig = plt.figure()
+    feature_ax = fig.add_subplot(1, 1, 1)
+    price_ax = feature_ax.twinx()
+    feature_ax.plot(sub_df.date, sub_df[liquidity_key], c = "lime", label = "AR liquidity proxy")
+    price_ax.plot(sub_df.date, sub_df.close, c = "magenta", label = "close price")
+    feature_ax.set_xlabel("Date")
+    price_ax.set_ylabel("Price (USD)")
+    feature_ax.set_ylabel("Abdi-Ronaldo Liquidity proxy")
+    price_ax.legend(loc = "upper right")
+    feature_ax.legend(loc = "upper left")
+    price_ax.set_title("AR Liquidity + Price On F over past year")
+    plt.show()
+
+if test_MA_crossover == True:
+    #get data
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+
+    #compute features
+    liquidity_feature = FeatureRequest(name='MA_crossover', #moving average crossover
+                                       params={'timeperiod': 50}, #50 day MA
+                                       shift=-1, #make feature from prev day
+                                       alias='MA_cross', #
+                                       input_type = "raw")
+    feature_engine = FeatureEngine([liquidity_feature])
+    df = feature_engine.compute(df)
+
+    #get F data to show for the test
+    symbol = "F"
+    if symbol not in df['act_symbol'].values:
+        symbol = df['act_symbol'].unique()[0]
+    mask = (df['act_symbol'] == symbol)
+    sub_df = df.loc[mask].copy().sort_values('date').tail(252)
+    st()
+    print(sub_df.keys())
+    liquidity_key = [key for key in sub_df.keys() if "F" in key.split("_")][0]
+    fig = plt.figure()
+    feature_ax = fig.add_subplot(1, 2, 1)
+    price_ax = fig.add_subplot(1, 2, 2)
+    feature_ax.plot(sub_df.date, sub_df[liquidity_key], c = "lime", label = "Crossover bool \n (1 = Above, 2 = Below)")
+    price_ax.plot(sub_df.date, sub_df.close, c = "magenta", label = "close price")
+    price_ax.plot(sub_df.date, sub_df.close.rolling(50).mean(), c = "teal", label = "50 day MA")
+    feature_ax.set_xlabel("Date")
+    price_ax.set_xlabel("Date")
+    price_ax.set_ylabel("Price (USD)")
+    feature_ax.set_ylabel("Above/Below")
+    price_ax.legend(loc = "upper right")
+    feature_ax.legend(loc = "upper left")
+    price_ax.set_title("MA crossover on F over past year")
+    plt.tight_layout()
+    plt.show()
+
+# ... inside clean_tests.py ...
+if test_hurst_autocorr == True:
+    print("\n========================================")
+    print("Testing Persistence: Autocorrelation vs Hurst")
+    print("========================================")
+
+    # 1. Load Data
+    print("Loading data...")
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    
+    # --- SPEED OPTIMIZATION ---
+    # Filter to just a few symbols for the test. 
+    # This prevents the engine from calculating features for 5000+ stocks.
+    test_symbols = ['TSLA', 'AAPL', 'SPY'] 
+    df = df[df['act_symbol'].isin(test_symbols)].copy()
+    print(f"Data filtered to {len(test_symbols)} symbols for testing.")
+    
+    # 2. Define Features
+    requests = []
+    
+    # A. Autocorrelation (Short-term memory)
+    # Calculated on Returns. 
+    # High +Val = Trending, Negative = Mean Reverting (Choppy)
+    requests.append(FeatureRequest(name='AUTOCORR', 
+                                   params={'timeperiod': 20}, 
+                                   shift=-1, 
+                                   alias='auto_corr', 
+                                   input_type='log_ret'))
+    
+    # B. Hurst Exponent (Long-term memory)
+    # Calculated on Log Prices (function handles diff internally).
+    # > 0.5 = Trending, < 0.5 = Mean Reverting, 0.5 = Random Walk
+    requests.append(FeatureRequest(name='HURST', 
+                                   params={'timeperiod': 100}, 
+                                   shift=-1, 
+                                   alias='hurst', 
+                                   input_type='log_price'))
+
+    # 3. Compute
+    print("Computing features...")
+    feature_engine = FeatureEngine(requests)
+    df = feature_engine.compute(df)
+
+    # 4. Filter for Visualization
+    # We choose TSLA because it often shows distinct trending vs ranging regimes
+    symbol = "TSLA"
+    if symbol not in df['act_symbol'].values:
+        symbol = df['act_symbol'].unique()[0]
+        
+    # Get last 500 days to see the evolution
+    mask = (df['act_symbol'] == symbol)
+    sub_df = df.loc[mask].copy().sort_values('date').tail(500)
+
+    # Identify dynamic column names generated by the engine
+    keys = sub_df.keys()
+    try:
+        ac_col = [k for k in keys if "auto_corr" in k][0]
+        hurst_col = [k for k in keys if "hurst" in k][0]
+    except IndexError:
+        print("Error: Could not find feature columns. Check FeatureEngine names.")
+        print("Available columns:", keys)
+        exit()
+
+    # 5. Plotting
+    print(f"Generating plot for {symbol}...")
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1, 1]})
+    
+    # Plot 1: Price
+    ax1.plot(sub_df['date'], sub_df['close'], color='white', linewidth=1, label='Price')
+    ax1.set_title(f"Price Action: {symbol}")
+    ax1.set_ylabel("Price ($)")
+    ax1.legend(loc="upper left")
+    ax1.grid(True, alpha=0.2)
+
+    # Plot 2: Hurst Exponent (Long Term)
+    ax2.plot(sub_df['date'], sub_df[hurst_col], color='cyan', linewidth=1.5, label='Hurst (100d)')
+    
+    # Reference lines for Hurst
+    ax2.axhline(0.5, color='red', linestyle='--', alpha=0.8, label='Random Walk (0.5)')
+    
+    # Fill areas to highlight regimes
+    # Cyan fill = Trending (Persistent)
+    ax2.fill_between(sub_df['date'], 0.5, sub_df[hurst_col], 
+                     where=(sub_df[hurst_col] > 0.5), color='cyan', alpha=0.1)
+    # Pink fill = Mean Reverting (Anti-persistent)
+    ax2.fill_between(sub_df['date'], 0.5, sub_df[hurst_col], 
+                     where=(sub_df[hurst_col] < 0.5), color='magenta', alpha=0.1)
+    
+    ax2.set_title("Long-Term Memory: Hurst Exponent (Trend Strength)")
+    ax2.set_ylabel("Hurst Index")
+    ax2.legend(loc="upper left")
+    ax2.grid(True, alpha=0.2)
+    ax2.set_ylim(0.2, 0.8) # Typical range for Hurst
+
+    # Plot 3: Autocorrelation (Short Term)
+    ax3.plot(sub_df['date'], sub_df[ac_col], color='lime', linewidth=1, label='Autocorr (20d)')
+    ax3.axhline(0.0, color='white', linestyle='--', alpha=0.5)
+    
+    # Visual aid for significant correlation
+    ax3.axhline(0.2, color='white', linestyle=':', alpha=0.2)
+    ax3.axhline(-0.2, color='white', linestyle=':', alpha=0.2)
+    
+    ax3.set_title("Short-Term Persistence: Serial Correlation of Returns")
+    ax3.set_ylabel("Correlation")
+    ax3.legend(loc="upper left")
+    ax3.grid(True, alpha=0.2)
+    
+    plt.tight_layout()
+    plt.show()
+    print("Test Complete.")
+
+if test_BETA == True:
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    beta_feature = FeatureRequest(name='pandas_beta', #moving average crossover
+                                       params={'timeperiod': 50}, #get medium term beta from the past 50 days
+                                       shift=-1, #make feature from prev day
+                                       alias='Beta')
+    feature_engine = FeatureEngine([beta_feature])
+    df = feature_engine.compute(df)
+    symbol = "F"
+    if symbol not in df['act_symbol'].values:
+        symbol = df['act_symbol'].unique()[0]
+    mask = (df['act_symbol'] == symbol)
+    sub_df = df.loc[mask].copy().sort_values('date').tail(252)
+    print(sub_df.keys())
+    print(sub_df.head(10))
+    beta_key = [key for key in sub_df.keys() if "F" in key.split("_")][0]
+    fig = plt.figure(figsize = (12, 5))
+    feature_ax = fig.add_subplot(1, 2, 1)
+    price_ax = fig.add_subplot(1, 2, 2, sharex = feature_ax)
+    ref_price_ax = price_ax.twinx()
+    feature_ax.plot(sub_df.date, sub_df[beta_key], c = "lime", label = "beta")
+    correlation_ax = feature_ax.twinx()
+    rolling_corr = sub_df['log_ret'].rolling(50).corr(sub_df['MKT_SPY_RET'])
+    correlation_ax.plot(sub_df.date, rolling_corr, c = "magenta", label = "correlation")
+    price_ax.plot(sub_df.date, sub_df.log_ret, c = "magenta", label = symbol)
+    price_ax.plot(sub_df.date, sub_df.MKT_SPY_RET, label = "SPY")
+    feature_ax.set_xlabel("Date")
+    price_ax.set_xlabel("Date")
+    price_ax.set_ylabel("Log ret")
+    feature_ax.set_ylabel("Beta")
+    price_ax.legend(loc = "upper right")
+    feature_ax.legend(loc = "upper left")
+    correlation_ax.legend(loc = "upper right")
+    fig.suptitle("50 day Beta on F over the past year")
+    plt.tight_layout()
+    plt.show()
+    st()
+
+if test_vwap_zscore == True:
+    print("\n========================================")
+    print("Testing VWAP Z-Score Feature")
+    print("========================================")
+    
+    # 1. Load Data
+    try:
+        df = pd.read_feather("Data/all_ohlcv.feather")
+        df["date"] = pd.to_datetime(df["date"])
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        exit()
+
+    # 2. Compute Feature
+    # We use shift=0 for visualization to align Price(t) with VWAP(t)
+    TIMEPERIOD = 20
+    vwap_req = FeatureRequest(name='VWAP_Z', 
+                              params={'timeperiod': TIMEPERIOD}, 
+                              shift=-1, 
+                              alias='vwap_z')
+    
+    print(f"Computing VWAP Z-Score ({TIMEPERIOD}d)...")
+    engine = FeatureEngine([vwap_req])
+    df = engine.compute(df)
+
+    # 3. Filter Data for Visualization
+    symbol = "F" # Ford
+    if symbol not in df['act_symbol'].values:
+        symbol = df['act_symbol'].unique()[0]
+    
+    mask = df['act_symbol'] == symbol
+    sub_df = df.loc[mask].copy().sort_values('date').tail(252)
+
+    # 4. Manual VWAP Calculation (for overlay plot)
+    # The engine returns Z-Score, but we want to plot the actual VWAP line too
+    sub_df['pv'] = sub_df['close'] * sub_df['volume']
+    sub_df['roll_vwap'] = sub_df['pv'].rolling(TIMEPERIOD).sum() / sub_df['volume'].rolling(TIMEPERIOD).sum()
+
+    # 5. Plotting
+    # Layout: 1 Row, 2 Columns, Share X
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6), sharex=True)
+
+    # --- Plot 1: Price vs VWAP ---
+    ax1.plot(sub_df.date, sub_df.close, color='magenta', linewidth=1.5, label='Close Price')
+    ax1.plot(sub_df.date, sub_df.roll_vwap, color='cyan', linestyle='--', linewidth=1.5, label=f'{TIMEPERIOD}-Day VWAP')
+    
+    ax1.set_title(f"{symbol} Price vs VWAP")
+    ax1.set_ylabel("Price ($)")
+    ax1.legend(loc="upper left")
+    ax1.grid(True, alpha=0.2)
+
+    # --- Plot 2: VWAP Z-Score ---
+    # Find the feature column name dynamically
+    z_col = [c for c in sub_df.columns if 'vwap_z' in c][0]
+    
+    ax2.plot(sub_df.date, sub_df[z_col], color='lime', linewidth=1.5, label='VWAP Z-Score')
+    
+    # Reference Lines
+    ax2.axhline(2, color='red', linestyle=':', alpha=0.6, label='Overbought (+2)')
+    ax2.axhline(-2, color='red', linestyle=':', alpha=0.6, label='Oversold (-2)')
+    ax2.axhline(0, color='white', linestyle='-', alpha=0.3)
+    
+    ax2.set_title(f"Distance from VWAP (Std Devs)")
+    ax2.set_ylabel("Z-Score")
+    ax2.legend(loc="upper left")
+    ax2.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    plt.show()
+    st()
