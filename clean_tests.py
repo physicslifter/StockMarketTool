@@ -52,8 +52,8 @@ test_feature_engine2 = 0
 test_liquidity = 0
 test_MA_crossover = 0
 test_hurst_autocorr = 0
-test_BETA = 0 #test for pandas BETA feature
-test_vwap_zscore = 1
+test_BETA = 1 #test for pandas BETA feature
+test_vwap_zscore = 0
 
 #=====================================
 #useful functions
