@@ -58,7 +58,10 @@ test_vol_zscore = 0
 test_adx_regime = 0
 test_range_features = 0
 test_gap_sigma = 0
-test_sharpe_target = 1
+test_sharpe_target = 0
+
+#testing the model
+test_model = 1
 
 #=====================================
 #useful functions
@@ -1299,3 +1302,46 @@ if test_sharpe_target == True:
     
     plt.title("Forward Sharpe Ratio (The 'Quality' Target)")
     plt.show()
+
+if test_model == True:
+    #get a universe for training the model
+    print("GETTING UNIVERSE...")
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    filters = [
+        TopLiquidityFilter(N = 3000),
+        PriceFilter(min_price = 5),
+        AdvancedStatsFilter(min_history_days = None,
+                            max_crash = -0.5,
+                            require_uptrend = None,
+                            volatility_n = 1000)
+    ]
+    universe = Universe(master_df = df)
+    universe.add_filters(filters)
+    dates = [pd.Timestamp("2020-01-01"), pd.Timestamp("2021-01-01")]
+    universe_data = universe.get_all_universe_data(dates = dates)
+
+    #define model
+    model = Model(universe_data)
+
+    #define features & add
+    volatility = FeatureRequest(name='VOL_ZSCORE', 
+                                         params={'timeperiod': 20}, 
+                                         shift=-1, 
+                                         input_type='raw',
+                                         alias='vol_z')
+    liquidity = FeatureRequest(name='SPREAD_AR', params={'timeperiod': 20}, shift=-1, alias='liquidity', transform='rank')
+    autocorrelation = FeatureRequest(name='AUTOCORR', 
+                                   params={'timeperiod': 20}, 
+                                   shift=-1, 
+                                   alias='auto_corr', 
+                                   input_type='log_ret')
+    z_score = FeatureRequest(name='ZSCORE', params={'timeperiod': 20}, shift=-1, input_type='log_ret', alias='vol_zscore')
+    model.add_features([volatility, liquidity, autocorrelation, z_score])
+
+    #define target & add
+    target = FeatureRequest(name='SUM', params={'timeperiod': 5}, shift=1, input_type='log_ret', alias='target_5d', transform='binary')
+    model.add_target(target)
+    #split data for training
+    model.split_data(cutoffs = [0.7, 0.85, 1])
+    model.train_model(save_name = "clean_model_test")
