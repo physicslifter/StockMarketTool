@@ -13,10 +13,18 @@ Model
 PortfolioStrategy
     - incorporates the model
 '''
+
 import pandas as pd
 import numpy as np
 from joblib import Parallel, delayed
 from dateutil.relativedelta import relativedelta
+import lightgbm as lgb
+import optuna
+import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, roc_auc_score, log_loss
+import warnings
+from FeatureEngine import *
+from pdb import set_trace as st
 
 def calculate_metrics_single(ticker, prices):
     """
@@ -336,13 +344,151 @@ class Universe:
                 final_df.to_feather(save_name)
             else:
                 raise Exception("Extension invalid. Write code to save for this file type")
+        self.universe_data = final_df
         return final_df
-                
-
 
 class Model:
-    def __init__(self):
-        pass
+    def __init__(self, universe_data):
+        self.data = universe_data #all data to train the model on
+        self.data["date"] = pd.to_datetime(self.data["date"])
+        self.has_features = False #no features upon initialization
+        self.has_target = False #no target upon initialization
+        self.data_split = False #default whether data has been split to false
+        self.params_tuned = False
+        self.variables_generated = False
+
+    def split_data(self,
+                   cutoffs:list = None
+                   ):
+        self.generate_targets_and_features()
+        if self.has_features == False:
+            raise Exception("No features added")
+        if self.has_target == False:
+            raise Exception("No target added")
+        if len(cutoffs) != 3:
+            raise Exception("Must have 3 cutoffs; 1 each for training, validation & test data")
+        if cutoffs[0] >= cutoffs[1]:
+            raise Exception(f"Validation cutoff {cutoffs[1]} must be larger than training cutoff {cutoffs[0]}")
+        elif cutoffs[1] >= cutoffs[2]:
+            raise Exception(f"Test cutoff {cutoffs[2]} must be larger than validation cutoff {cutoffs[1]}")
+        unique_dates = sorted(self.data['date'].unique())
+        print(len(unique_dates), int(len(unique_dates) * cutoffs[0]), int(len(unique_dates) * cutoffs[1]), int(len(unique_dates) * cutoffs[2]))
+        train_cutoff = unique_dates[int(len(unique_dates) * cutoffs[0])]
+        val_cutoff = unique_dates[int(len(unique_dates) * cutoffs[1])]
+        test_cutoff = unique_dates[int(len(unique_dates) * cutoffs[2]) - 1]
+        self.train_df = self.data[self.data['date'] < train_cutoff]
+        self.val_df = self.data[(self.data['date'] >= train_cutoff) & (self.data['date'] < val_cutoff)]
+        self.test_df = self.data[(self.data['date'] >= val_cutoff) & (self.data['date'] < test_cutoff)]
+
+        self.features = [key for key in self.data.keys() if "F" in key.split("_")]
+        self.targets = [key for key in self.data.keys() if "T" in key.split("_")]
+        self.target_key = self.targets[0]
+        if len(self.targets) != 1:
+            st()
+            raise Exception(f"Only one target allowed. Identified targets: {self.targets}")
+        
+        self.X_train, self.y_train = self.train_df[self.features], self.train_df[self.targets[0]]
+        self.X_val, self.y_val = self.val_df[self.features], self.val_df[self.targets[0]]
+        self.X_test, self.y_test_bin = self.test_df[self.features], self.test_df[self.targets[0]]
+
+        self.data_split = True
+
+    def tune_params(self):
+        if self.data_split == False:
+            raise Exception("Data must be split before tuning params")
+        print("TUNING PARAMS...")
+        #objective function for tuning params
+        def objective(trial):
+            param = {
+                "objective": "binary",
+                "metric": "auc", 
+                "verbosity": -1,
+                "boosting_type": "gbdt",
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1),
+                "num_leaves": trial.suggest_int("num_leaves", 20, 150),
+                "max_depth": trial.suggest_int("max_depth", 3, 10),
+                "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 100, 1000),
+                "lambda_l1": trial.suggest_float("lambda_l1", 1e-3, 10.0, log=True),
+                "lambda_l2": trial.suggest_float("lambda_l2", 1e-3, 10.0, log=True),
+                "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+                "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+                "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
+                "seed": 42
+            }
+
+            # Weights logic
+            train_weights = np.log1p(np.abs(self.train_df[self.target_key]) * 100)
+
+            dtrain = lgb.Dataset(self.X_train, label=self.y_train, weight=train_weights)
+            dval = lgb.Dataset(self.X_val, label=self.y_val, reference=dtrain)
+
+            gbm = lgb.train(
+                param, dtrain, valid_sets=[dval],
+                callbacks=[
+                    lgb.early_stopping(stopping_rounds=20), 
+                    optuna.integration.LightGBMPruningCallback(trial, "auc") 
+                ]
+            )
+
+            preds = gbm.predict(self.X_val)
+            return roc_auc_score(self.y_val, preds)
+
+        study = optuna.create_study(direction="maximize") 
+        study.optimize(objective, n_trials=20)
+        self.best_params = study.best_params
+        self.params_tuned = True
+
+    def add_target(self, target):
+        self.target = target
+        self.has_target = True
+
+    def add_features(self, features):
+        '''
+        Adds features to the dataset
+        '''
+        self.features = features
+        self.has_features = True
+
+    def generate_targets_and_features(self):
+        if self.has_features == False:
+            raise Exception("Model does not have features")
+        if self.has_target == False:
+            raise Exception("Model does not have a target")
+        self.variables_generated = True
+        feature_engine = FeatureEngine(feature_requests = self.features + [self.target])
+        self.data = feature_engine.compute(self.data)
+        #drop rows where targets and features are none
+        feature_keys = [key for key in self.data.keys() if "F" in key.split("_")]
+        target_key = [key for key in self.data.keys() if "T" in key.split("_")][0]
+        self.data = self.data.dropna(subset = feature_keys + [target_key]) #drop rows with nan for features or targets
+
+    def train_model(self, save_name:str=None):
+        if self.params_tuned == False:
+            self.tune_params()
+        self.model = lgb.train(
+                self.best_params,
+                lgb.Dataset(self.X_train, label=self.y_train),
+                valid_sets=[lgb.Dataset(self.X_val, label=self.y_val)],
+                callbacks=[lgb.early_stopping(stopping_rounds=50)]
+            )
+        self.test_model()
+        if type(save_name) != type(None):
+            self.model.save_model("Data/{save_name}.txt")
+
+    def test_model(self):
+        """Tests the model after generating
+        """
+        test_probs = self.model.predict(self.X_test)
+        self.test_df["prob_up"] = test_probs
+        test_preds_class = (test_probs > 0.5).astype(int)
+        print("MODEL ACCURACY\n========")
+        acc = accuracy_score(self.y_test_bin, test_preds_class)
+        auc = roc_auc_score(self.y_test_bin, test_probs)
+        print(f"accuracy: {acc}")
+        print(f"auc - roc: {auc}")
+        lgb.plot_importance(self.model, importance_type = 'gain', figsize = (10, 6), title = "Feature Importance")
+        plt.tight_layout()
+        plt.show()
 
 class PortfolioStrat:
     def __init__(self):
