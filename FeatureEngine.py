@@ -15,6 +15,24 @@ def calc_zscore(real, timeperiod=20):
     roll_std = s.rolling(window=timeperiod).std()
     return ((s - roll_mean) / roll_std).values
 
+def calc_volume_zscore(volume, timeperiod=20):
+    """
+    Calculates Z-Score of Volume (using Log transformation).
+    Standardizes volume trends: (LogVol - MeanLogVol) / StdLogVol
+    """
+    s_vol = pd.Series(volume)
+    
+    # 1. Log transform 
+    # (Phase 1 of engine already sets <=0 volume to NaN, so this is safe)
+    log_vol = np.log(s_vol)
+    
+    # 2. Rolling Stats on Log Volume
+    roll_mean = log_vol.rolling(window=timeperiod).mean()
+    roll_std = log_vol.rolling(window=timeperiod).std(ddof=1)
+    
+    # 3. Z-Score
+    return ((log_vol - roll_mean) / roll_std).values
+
 def calc_abdi_ranaldo(high, low, close, timeperiod=20):
     """
     Abdi-Ranaldo (2017) Spread Estimator.
@@ -203,6 +221,128 @@ def calc_vwap_zscore(close, volume, timeperiod=20):
     
     # Fill any initial NaNs (result of rolling window)
     return z_score.values
+    
+def calc_adx_regime(high, low, close, timeperiod=14, threshold=25):
+    """
+    Returns:
+     1 = Bull Trend (Strong ADX + Positive Direction)
+     0 = Chop / Range (Weak ADX)
+    -1 = Bear Trend (Strong ADX + Negative Direction)
+    """
+    # 1. Calculate Component Indicators
+    adx = talib.ADX(high, low, close, timeperiod=timeperiod)
+    pdi = talib.PLUS_DI(high, low, close, timeperiod=timeperiod)
+    mdi = talib.MINUS_DI(high, low, close, timeperiod=timeperiod)
+    
+    # 2. Vectorized Logic
+    # Default to 0 (Chop)
+    regime = np.zeros_like(adx)
+    
+    # Identify Trending Indices (ADX > Threshold)
+    trending = (adx > threshold)
+    
+    # Identify Bullish: Trending AND (PDI > MDI)
+    bull_mask = trending & (pdi > mdi)
+    regime[bull_mask] = 1
+    
+    # Identify Bearish: Trending AND (MDI > PDI)
+    bear_mask = trending & (mdi > pdi)
+    regime[bear_mask] = -1
+    
+    return regime
+
+def calc_range_efficiency(open_p, high, low, close, timeperiod=1):
+    """
+    Body-to-Range Ratio (Candle Efficiency).
+    1.0 = All body (Trend)
+    0.0 = All wick (Indecision)
+    """
+    s_open = pd.Series(open_p)
+    s_high = pd.Series(high)
+    s_low = pd.Series(low)
+    s_close = pd.Series(close)
+    
+    # Calculate Range and Body
+    rng = s_high - s_low
+    body = (s_close - s_open).abs()
+    
+    # Avoid Division by Zero (if High == Low, ratio is 0 or 1 depending on logic, usually 1 if flat)
+    # We replace 0 range with NaN or a small epsilon
+    rng = rng.replace(0, np.nan) 
+    
+    return (body / rng).values
+
+def calc_relative_range(high, low, timeperiod=20):
+    """
+    Current Range / Average Range of last N days.
+    """
+    s_high = pd.Series(high)
+    s_low = pd.Series(low)
+    
+    # Current Range
+    rng = s_high - s_low
+    
+    # Average Range (ATR is technically different because of gaps, 
+    # but simple mean of range is often cleaner for this specific feature)
+    avg_rng = rng.rolling(window=timeperiod).mean()
+    
+    return (rng / avg_rng).values
+
+def calc_gap_sigma(open_p, high, low, close, timeperiod=14):
+    """
+    Calculates Gap Size normalized by Volatility (ATR).
+    Formula: (Open - PrevClose) / PrevATR
+    """
+    # 1. Calculate ATR (Volatility)
+    # Note: We compute ATR on the raw arrays first
+    atr = talib.ATR(high, low, close, timeperiod=timeperiod)
+    
+    # 2. Convert to Series for shifting
+    s_atr = pd.Series(atr)
+    s_open = pd.Series(open_p)
+    s_close = pd.Series(close)
+    
+    # 3. Get Context (Yesterday's Data)
+    # We compare the gap to Yesterday's Volatility, not Today's.
+    prev_atr = s_atr.shift(1)
+    prev_close = s_close.shift(1)
+    
+    # 4. Calculate Gap
+    raw_gap = s_open - prev_close
+    
+    # 5. Normalize
+    # Handle division by zero/nan if ATR is missing
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sigma = raw_gap / prev_atr
+        
+    return sigma.values
+
+def calc_forward_sharpe(close, timeperiod=5):
+    """
+    Calculates the Forward Sharpe Ratio (Target).
+    Formula: Future_Return / Future_Volatility
+    """
+    # 1. Log Returns
+    s_close = pd.Series(close)
+    log_ret = np.log(s_close / s_close.shift(1))
+    
+    # 2. Rolling Forward Window
+    # We use a trick: Reverse the series, calculate rolling, then reverse back.
+    # This allows us to get the "Next 5 days" statistics aligned with "Today".
+    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=timeperiod)
+    
+    # Sum of returns over next N days
+    fwd_ret = log_ret.rolling(window=indexer).sum()
+    
+    # Std Dev of returns over next N days
+    fwd_std = log_ret.rolling(window=indexer).std()
+    
+    # 3. Calculate Sharpe
+    # Add epsilon to prevent division by zero
+    sharpe = fwd_ret / (fwd_std + 1e-6)
+    
+    return sharpe.values
+
 
 # ==========================================
 # 1. THE REGISTRY
@@ -294,6 +434,48 @@ FEATURE_REGISTRY = {
         'outputs': ['real']
     },
 
+    'VOL_ZSCORE': {
+        'type': 'custom_stat', 
+        'fn': calc_volume_zscore,
+        'inputs': ['volume'],   # Requires raw volume column
+        'outputs': ['real']
+    },
+
+    'ADX_REGIME': {
+        'type': 'custom_stat',
+        'fn': calc_adx_regime,
+        'inputs': ['high', 'low', 'close'],
+        'outputs': ['real']
+    },
+    
+    'RANGE_EFFICIENCY': {
+        'type': 'custom_stat',
+        'fn': calc_range_efficiency,
+        'inputs': ['open', 'high', 'low', 'close'],
+        'outputs': ['real']
+    },
+    
+    'REL_RANGE': {
+        'type': 'custom_stat',
+        'fn': calc_relative_range,
+        'inputs': ['high', 'low'],
+        'outputs': ['real']
+    },
+
+    'GAP_SIGMA': {
+        'type': 'custom_stat',
+        'fn': calc_gap_sigma,
+        # We need Open for the Gap, and High/Low/Close for ATR
+        'inputs': ['open', 'high', 'low', 'close'], 
+        'outputs': ['real']
+    },
+
+    'TARGET_SHARPE': {
+        'type': 'custom_stat',
+        'fn': calc_forward_sharpe,
+        'inputs': ['close'], # We calculate returns internally
+        'outputs': ['real']
+    },
 }
 
 # ==========================================
