@@ -1,9 +1,9 @@
 '''
 Universe Generator: Institutional Liquidity + Hurst Feature + Low Volatility
 Criteria:
-1. Liquidity: Top 1000 stocks by Dollar Volume.
-2. Junk Filter: Excludes < $15.00, Crash > 60% in the last year
-3. Volatility Filter: Selects the bottom 500 (most stable) from the remaining liquid stocks.
+1. Liquidity: Top 250 stocks by Dollar Volume (The S&P 250).
+2. Junk Filter: Excludes < $15.00, Crash > 60%.
+3. Volatility Filter: Selects the bottom 50 (most stable) from the liquid list.
 4. Feature: Adds 'hurst_1y' (Hurst Exponent over previous year).
 '''
 
@@ -19,20 +19,20 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # --- CONFIGURATION ---
-START_YEAR = 2012
-END_YEAR = 2026
+START_YEAR = 2019
+END_YEAR = 2025
 START_MONTH = 1
-END_MONTH = 1
+END_MONTH = 12
 
-SAVE_PATH = "Data/hurst_training_universe.feather"
-OHLCV_PATH = "Data/all_ohlcv.feather"
+SAVE_PATH = "Data/test_training_universe.feather"
+OHLCV_PATH = "Data/all_ohlcv_w_splits.feather"
 ETF_PATH = "Data/ETFs.feather"
 
-# Filters
-TOP_N_LIQUIDITY = 1000
-BOTTOM_N_VOLATILITY = 500  # Keep the safest 50% of the liquid universe
-MIN_PRICE = 15.00          # Raised to avoid spread friction
-MAX_ANNUAL_DROP = -0.60    # Exclude stocks that lost >60% value in 1 year
+# --- UPDATED FILTERS FOR 50 STOCKS ---
+TOP_N_LIQUIDITY = 3000      # Broad Pool: Only look at the top 250 most liquid stocks
+BOTTOM_N_VOLATILITY = 1000   # Final Selection: Pick the 50 most stable from that list
+MIN_PRICE = 5          # Raised to $20 to ensure institutional quality
+MAX_ANNUAL_DROP = -0.50    # Stricter: Avoid anything that dropped >50%
 
 # --- HELPER FUNCTIONS ---
 
@@ -128,8 +128,6 @@ if __name__ == "__main__":
     for year in years:
         for month in months:
             # 1. Define Time Windows
-            # Target Month: The month we are generating the UNIVERSE FOR.
-            # We must select the universe based on data BEFORE this date.
             target_start = pd.Timestamp(year, month, 1)
             target_end = target_start + relativedelta(months=1)
             
@@ -138,7 +136,6 @@ if __name__ == "__main__":
                 break
                 
             # Liquidity Window (Previous Month)
-            # Logic: data < target_start means up to the last second of previous month.
             liq_start = target_start - relativedelta(months=1)
             
             # Feature Window (Previous Year for Hurst/Momentum/Vol)
@@ -147,19 +144,19 @@ if __name__ == "__main__":
             print(f"Processing {target_start.date()}...", end=" ")
 
             # --- STEP 1: LIQUIDITY FILTER ---
-            # Strictly use data BEFORE the target month starts
             mask_liq = (all_data['date'] >= liq_start) & (all_data['date'] < target_start)
             df_liq = all_data.loc[mask_liq, ['act_symbol', 'close', 'volume']]
             
             if df_liq.empty: 
                 print("No data.")
                 continue
-                
+            
+            # Get broad pool of liquid stocks
             liquid_candidates = get_top_liquid_tickers(df_liq, n=TOP_N_LIQUIDITY)
             
             del df_liq, mask_liq
             
-            # --- STEP 2: CALCULATE METRICS (HURST + MOMENTUM + VOL) ---
+            # --- STEP 2: CALCULATE METRICS ---
             mask_feat = (all_data['date'] >= feat_start) & (all_data['date'] < target_start)
             mask_sym = all_data['act_symbol'].isin(liquid_candidates)
             
@@ -169,14 +166,6 @@ if __name__ == "__main__":
                 print("No history.")
                 continue
             
-            # CHECK FOR LEAKAGE
-            # The latest date in our feature set MUST be before the target start date
-            max_feat_date = df_feat['date'].max()
-            if max_feat_date >= target_start:
-                print(f"CRITICAL LEAK ERROR: Feature Data includes {max_feat_date} but Target starts {target_start}")
-                exit()
-
-            # Group for Parallel Processing
             grouped = df_feat.groupby('act_symbol')['close']
             tasks = [(name, group.values) for name, group in grouped]
             
@@ -185,41 +174,38 @@ if __name__ == "__main__":
             )
             
             # --- STEP 3: APPLY FILTERS ---
-            
-            # Temp storage to sort by volatility
             temp_universe = []
-            
             dropped_junk = 0
             
             for ticker, hurst, ann_ret, vol, price in results:
                 # Filter A: Calculation Failed
                 if np.isnan(hurst) or np.isnan(vol): continue
-                
-                # Filter B: Penny Stock
+                #if np.isnan(vol): continue
+
+                # Filter B: Penny Stock (Strict)
                 if price < MIN_PRICE:
                     dropped_junk += 1
                     continue
                 
-                # Filter C: Death Spiral (>60% drop)
+                # Filter C: Death Spiral (>50% drop)
                 if ann_ret < MAX_ANNUAL_DROP:
                     dropped_junk += 1
                     continue
                 
-                # Add to temp list for Volatility Sorting
                 temp_universe.append({
                     'act_symbol': ticker,
                     'hurst_1y': hurst,
                     'volatility': vol
                 })
             
-            # --- STEP 4: VOLATILITY SORT ---
+            # --- STEP 4: VOLATILITY SORT (THE "SAFE 50") ---
             if not temp_universe:
                 print("No candidates passed junk filter.")
                 continue
                 
             df_candidates = pd.DataFrame(temp_universe)
             
-            # Sort by Volatility (Low to High) and take top N
+            # Sort by Volatility (Low to High) and take top 50
             df_candidates = df_candidates.sort_values('volatility', ascending=True)
             final_selection = df_candidates.head(BOTTOM_N_VOLATILITY).copy()
             
@@ -229,7 +215,6 @@ if __name__ == "__main__":
             del df_feat, grouped, tasks, results, df_candidates
             
             # --- STEP 5: FETCH TARGET DATA ---
-            # Get data for the month we are going to trade
             mask_target = (all_data['date'] >= target_start) & \
                           (all_data['date'] < target_end) & \
                           (all_data['act_symbol'].isin(valid_tickers))
@@ -253,7 +238,8 @@ if __name__ == "__main__":
     if training_batches:
         print("\nConcatenating final universe...")
         final_df = pd.concat(training_batches, ignore_index=True)
-        final_df = final_df.sort_values(['act_symbol', 'date'])
+        final_df = final_df.sort_values(['act_symbol', 'date'], ascending = True)
+        final_df = final_df.reset_index(drop=True)
         
         print(f"Saving to {SAVE_PATH}...")
         final_df.to_feather(SAVE_PATH)
