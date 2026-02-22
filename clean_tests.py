@@ -52,8 +52,13 @@ test_feature_engine2 = 0
 test_liquidity = 0
 test_MA_crossover = 0
 test_hurst_autocorr = 0
-test_BETA = 1 #test for pandas BETA feature
+test_BETA = 0 #test for pandas BETA feature
 test_vwap_zscore = 0
+test_vol_zscore = 0
+test_adx_regime = 0
+test_range_features = 0
+test_gap_sigma = 0
+test_sharpe_target = 1
 
 #=====================================
 #useful functions
@@ -952,3 +957,345 @@ if test_vwap_zscore == True:
     plt.tight_layout()
     plt.show()
     st()
+
+if test_vol_zscore == True:
+    print("\n========================================")
+    print("Testing Volume Z-Score Feature")
+    print("========================================")
+    
+    # 1. Load Data
+    try:
+        df = pd.read_feather("Data/all_ohlcv.feather")
+        df["date"] = pd.to_datetime(df["date"])
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        exit()
+
+    # 2. Compute Feature
+    # We use shift=-1 to create a feature available for tomorrow (Lagged)
+    # input_type="raw" is required because our function expects 'volume'
+    TIMEPERIOD = 20
+    vol_req = FeatureRequest(name='VOL_ZSCORE', 
+                             params={'timeperiod': TIMEPERIOD}, 
+                             shift=-1, 
+                             input_type='raw',
+                             alias='vol_z')
+    
+    print(f"Computing Volume Z-Score ({TIMEPERIOD}d)...")
+    engine = FeatureEngine([vol_req])
+    df = engine.compute(df)
+
+    # 3. Filter Data for Visualization
+    symbol = "TSLA" # High volume volatility stock
+    if symbol not in df['act_symbol'].values:
+        symbol = df['act_symbol'].unique()[0]
+    
+    mask = df['act_symbol'] == symbol
+    sub_df = df.loc[mask].copy().sort_values('date').tail(252)
+
+    # 4. Plotting
+    # Layout: 3 Rows (Price, Raw Volume, Vol Z-Score)
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 10), sharex=True, gridspec_kw={'height_ratios': [2, 1, 1]})
+
+    # --- Plot 1: Price ---
+    ax1.plot(sub_df.date, sub_df.close, color='white', linewidth=1.5, label='Close Price')
+    ax1.set_title(f"{symbol} Price Action")
+    ax1.set_ylabel("Price ($)")
+    ax1.legend(loc="upper left")
+    ax1.grid(True, alpha=0.2)
+
+    # --- Plot 2: Raw Volume ---
+    # Color bars based on price change (Green/Red)
+    colors = np.where(sub_df.close >= sub_df.open, 'green', 'red')
+    ax2.bar(sub_df.date, sub_df.volume, color=colors, alpha=0.5, label='Volume')
+    # Add Moving Average
+    vol_ma = sub_df['volume'].rolling(TIMEPERIOD).mean()
+    ax2.plot(sub_df.date, vol_ma, color='yellow', linestyle='--', linewidth=1, label=f'{TIMEPERIOD}d MA')
+    
+    ax2.set_ylabel("Volume")
+    ax2.legend(loc="upper left")
+    ax2.grid(True, alpha=0.2)
+
+    # --- Plot 3: Volume Z-Score ---
+    # Find the feature column name dynamically
+    z_col = [c for c in sub_df.columns if 'vol_z' in c][0]
+    
+    ax3.plot(sub_df.date, sub_df[z_col], color='cyan', linewidth=1.5, label='Vol Z-Score (Log Space)')
+    
+    # Reference Lines
+    ax3.axhline(2, color='red', linestyle=':', alpha=0.6, label='Unusual Activity (+2 std)')
+    ax3.axhline(0, color='white', linestyle='-', alpha=0.3, label='Average')
+    ax3.axhline(-2, color='gray', linestyle=':', alpha=0.6)
+    
+    # Highlight Spikes
+    ax3.fill_between(sub_df.date, 2, sub_df[z_col], where=(sub_df[z_col] > 2), color='red', alpha=0.3)
+    
+    ax3.set_title(f"Volume Trend (Z-Score of Log Volume)")
+    ax3.set_ylabel("Z-Score")
+    ax3.legend(loc="upper left")
+    ax3.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    plt.show()
+    st()
+
+if test_adx_regime == True:
+    print("\n========================================")
+    print("Testing ADX Regime Classification (1 / 0 / -1)")
+    print("========================================")
+    
+    # 1. Load Data
+    try:
+        df = pd.read_feather("Data/all_ohlcv.feather")
+        df["date"] = pd.to_datetime(df["date"])
+    except Exception as e:
+        print(f"Error loading data: {e}")
+        exit()
+
+    # 2. Compute Feature
+    # We use shift=0 to see the "Current" regime for visualization
+    # In training, you might use shift=-1 (Future Regime) or shift=0 (Current State)
+    req = FeatureRequest(name='ADX_REGIME', 
+                         params={'timeperiod': 14, 'threshold': 20}, # Lower threshold captures more trends
+                         shift=0, 
+                         alias='regime')
+    
+    engine = FeatureEngine([req])
+    df = engine.compute(df)
+
+    # 3. Filter for Visualization
+    symbol = "SPY" # Good example of distinct trends vs chop
+    if symbol not in df['act_symbol'].values:
+        symbol = df['act_symbol'].unique()[0]
+    
+    mask = df['act_symbol'] == symbol
+    sub_df = df.loc[mask].copy().sort_values('date').tail(1000)
+
+    # 4. Plotting
+    col_name = [c for c in sub_df.columns if 'regime' in c][0]
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
+
+    # -- Plot 1: Price colored by Regime --
+    # Hack to color line segments: Scatter plot is easier, but let's do background fill
+    ax1.plot(sub_df.date, sub_df.close, color='white', linewidth=1, label='Close Price')
+    
+    # Fill backgrounds
+    # Green for Bull (1), Red for Bear (-1), Gray/None for Chop (0)
+    y_min, y_max = ax1.get_ylim()
+    
+    # Bull Zones
+    ax1.fill_between(sub_df.date, sub_df.close.min(), sub_df.close.max(), 
+                     where=(sub_df[col_name] == 1), color='green', alpha=0.15, label='Bull Trend')
+    
+    # Bear Zones
+    ax1.fill_between(sub_df.date, sub_df.close.min(), sub_df.close.max(), 
+                     where=(sub_df[col_name] == -1), color='red', alpha=0.15, label='Bear Trend')
+
+    ax1.set_title(f"{symbol} Market Regimes (ADX Filter)")
+    ax1.set_ylabel("Price")
+    ax1.legend(loc="upper left")
+    ax1.grid(True, alpha=0.2)
+
+    # -- Plot 2: The Regime Signal --
+    ax2.step(sub_df.date, sub_df[col_name], where='post', linewidth=2, color='cyan')
+    
+    ax2.set_yticks([-1, 0, 1])
+    ax2.set_yticklabels(['Bear (-1)', 'Chop (0)', 'Bull (1)'])
+    ax2.grid(True, alpha=0.2)
+    ax2.set_title("Regime Signal")
+
+    plt.tight_layout()
+    plt.show()
+    st()
+
+if test_range_features == True:
+    print("\n========================================")
+    print("Testing Range Features (Efficiency & Relative)")
+    print("========================================")
+    
+    try:
+        df = pd.read_feather("Data/all_ohlcv.feather")
+        df["date"] = pd.to_datetime(df["date"])
+    except Exception as e:
+        print(f"Data error: {e}")
+        exit()
+
+    # Define Requests
+    reqs = [
+        # Is the candle solid (1) or a doji (0)?
+        FeatureRequest(name='RANGE_EFFICIENCY', params={}, shift=0, alias='candle_eff', input_type = "raw"),
+        # Is the range expanding (>1) or compressing (<1)?
+        FeatureRequest(name='REL_RANGE', params={'timeperiod': 20}, shift=0, alias='vol_ratio')
+    ]
+    
+    engine = FeatureEngine(reqs)
+    df = engine.compute(df)
+
+    # Filter for a stock (TSLA is good for volatility examples)
+    symbol = "TSLA"
+    if symbol not in df['act_symbol'].values: symbol = df['act_symbol'].unique()[0]
+    
+    sub_df = df[df['act_symbol'] == symbol].copy().sort_values('date').tail(100)
+    
+    # Extract columns
+    eff_col = [c for c in sub_df.columns if 'candle_eff' in c][0]
+    vol_col = [c for c in sub_df.columns if 'vol_ratio' in c][0]
+
+    # Plotting
+    fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(12, 12), sharex=True, 
+                                        gridspec_kw={'height_ratios': [2, 1, 1]})
+
+    # --- Plot 1: Price ---
+    ax1.plot(sub_df.date, sub_df.close, color='white', label='Price')
+    ax1.set_title(f"{symbol} Price Action")
+    ax1.grid(True, alpha=0.2)
+
+    # --- Plot 2: Range Efficiency (Body / Range) ---
+    # High values = Solid Candles (Trendiness)
+    # Low values = Wicks (Indecision)
+    ax2.plot(sub_df.date, sub_df[eff_col], color='cyan', linewidth=1)
+    ax2.axhline(0.5, color='white', linestyle=':', alpha=0.5)
+    
+    # Highlight Indecision (Dojis)
+    ax2.fill_between(sub_df.date, 0, sub_df[eff_col], 
+                     where=(sub_df[eff_col] < 0.2), color='red', alpha=0.5, label='Indecision (Doji)')
+    # Highlight Conviction (Marubozu)
+    ax2.fill_between(sub_df.date, 0, sub_df[eff_col], 
+                     where=(sub_df[eff_col] > 0.8), color='lime', alpha=0.5, label='Conviction')
+
+    ax2.set_title("Candle Efficiency (1.0 = Solid Body, 0.0 = All Wick)")
+    ax2.legend(loc="upper left")
+    ax2.grid(True, alpha=0.2)
+
+    # --- Plot 3: Relative Range (Expansion/Compression) ---
+    ax3.bar(sub_df.date, sub_df[vol_col], color='orange', alpha=0.6)
+    ax3.axhline(1.0, color='white', linestyle='-', alpha=0.5, label='Average')
+    ax3.axhline(0.5, color='cyan', linestyle='--', alpha=0.8, label='Squeeze (<0.5)')
+    ax3.axhline(2.0, color='red', linestyle='--', alpha=0.8, label='Explosion (>2.0)')
+    
+    ax3.set_title("Relative Range (Volatility Ratio)")
+    ax3.legend(loc="upper left")
+    ax3.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    plt.show()
+    st()
+
+if test_gap_sigma == True:
+    print("\n========================================")
+    print("Testing Gap Sigma (Side-by-Side View)")
+    print("========================================")
+    
+    # 1. Load Data
+    try:
+        df = pd.read_feather("Data/all_ohlcv.feather")
+        df["date"] = pd.to_datetime(df["date"])
+    except Exception as e:
+        print(f"Data error: {e}")
+        exit()
+
+    # 2. Define Request
+    # CRITICAL: We must use input_type='raw' because 'open' price is required
+    # and standard log_price data usually drops the open.
+    req = FeatureRequest(name='GAP_SIGMA', 
+                         params={'timeperiod': 14}, 
+                         shift=-1, 
+                         alias='gap_sig',
+                         input_type='raw')
+    
+    engine = FeatureEngine([req])
+    df = engine.compute(df)
+
+    # 3. Filter for a Volatile Stock (e.g., TSLA or NVDA)
+    symbol = "TSLA"
+    if symbol not in df['act_symbol'].values: 
+        symbol = df['act_symbol'].unique()[0]
+    
+    # Get last 100 days for clear candle visualization
+    sub_df = df[df['act_symbol'] == symbol].copy().sort_values('date').tail(100)
+    
+    # Identify the specific column name created
+    gap_col = [c for c in sub_df.columns if 'gap_sig' in c][0]
+
+    # 4. Plotting (1 Row, 2 Columns)
+    fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(16, 6), sharex=True)
+
+    # --- PLOT 1 (Left): Candlesticks ---
+    # Split Up/Down days
+    up = sub_df[sub_df.close >= sub_df.open]
+    down = sub_df[sub_df.close < sub_df.open]
+    
+    # Plot Wicks
+    ax1.vlines(up.date, up.low, up.high, color='dimgray', linewidth=0.8)
+    ax1.vlines(down.date, down.low, down.high, color='dimgray', linewidth=0.8)
+    
+    # Plot Bodies
+    # width=0.6 days
+    ax1.bar(up.date, up.close - up.open, bottom=up.open, color='green', width=0.6, alpha=0.6)
+    ax1.bar(down.date, down.close - down.open, bottom=down.open, color='red', width=0.6, alpha=0.6)
+    
+    ax1.set_title(f"{symbol} Price Action")
+    ax1.set_ylabel("Price ($)")
+    ax1.grid(True, alpha=0.2)
+
+    # --- PLOT 2 (Right): Gap Sigma ---
+    # Color logic: Green for Gap Up, Red for Gap Down
+    colors = np.where(sub_df[gap_col] >= 0, 'lime', 'magenta')
+    
+    ax2.bar(sub_df.date, sub_df[gap_col], color=colors, alpha=0.7, width=0.6)
+    
+    # Reference Lines (Significant Gaps)
+    ax2.axhline(0, color='white', linewidth=0.5)
+    ax2.axhline(2.0, color='red', linestyle='--', alpha=0.5, label='Extreme (+2 ATR)')
+    ax2.axhline(-2.0, color='red', linestyle='--', alpha=0.5)
+    ax2.axhline(1.0, color='white', linestyle=':', alpha=0.3)
+    ax2.axhline(-1.0, color='white', linestyle=':', alpha=0.3)
+    
+    ax2.set_title("Gap Magnitude (Normalized by Volatility)")
+    ax2.set_ylabel("Sigma (Gap / ATR)")
+    ax2.legend()
+    ax2.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    plt.show()
+    st()
+
+if test_sharpe_target == True:
+    print("Testing Forward Sharpe Target")
+    # ... load data ...
+    try:
+        df = pd.read_feather("Data/all_ohlcv.feather")
+        df["date"] = pd.to_datetime(df["date"])
+    except Exception as e:
+        print(f"Data error: {e}")
+        exit()
+
+    # Request
+    req = FeatureRequest(name='TARGET_SHARPE', params={'timeperiod': 10}, shift=0, alias='sharpe_10d')
+    engine = FeatureEngine([req])
+    df = engine.compute(df)
+    
+    # Plot
+    symbol = "TSLA"
+    sub_df = df[df['act_symbol'] == symbol].tail(200)
+    col = [c for c in sub_df.columns if 'sharpe' in c][0]
+    
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+    ax2 = ax1.twinx()
+    
+    # Plot Price
+    ax1.plot(sub_df.date, sub_df.close, color='gray', alpha=0.5)
+    
+    # Plot Sharpe Target
+    # Green = High Quality Up Trend
+    # Red = High Quality Down Trend
+    ax2.plot(sub_df.date, sub_df[col], color='blue', linewidth=1)
+    ax2.axhline(0, color='black', linewidth=0.5)
+    
+    # Highlight "Good Trades" (Sharpe > 1 or < -1)
+    ax2.fill_between(sub_df.date, 0, sub_df[col], where=(sub_df[col] > 1), color='green', alpha=0.3)
+    ax2.fill_between(sub_df.date, 0, sub_df[col], where=(sub_df[col] < -1), color='red', alpha=0.3)
+    
+    plt.title("Forward Sharpe Ratio (The 'Quality' Target)")
+    plt.show()
