@@ -420,6 +420,7 @@ class DataReader:
                     ratio = tf / ff
                 else:
                     ratio = float(row.get('ratio', 0))
+                print(f"{split_date} | {split_ticker} ACCOUNTED FOR")
             except:
                 continue
 
