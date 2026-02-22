@@ -1,14 +1,17 @@
 '''
 Tests for classes in clean_analysis.py
 '''
+# This tells Python: "Look inside the 'scripts' folder for my imports!"
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
+
 from DoltReader import DataReader
 from clean_analysis import *
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 from pdb import set_trace as st
 from matplotlib import pyplot as plt
-from Features import *
-#from FeatureEngine import *
 from FeatureEngine import *
 import math
 
@@ -53,7 +56,7 @@ test_liquidity = 0
 test_MA_crossover = 0
 test_hurst_autocorr = 0
 test_BETA = 0 #test for pandas BETA feature
-test_vwap_zscore = 0
+test_vwap_zscore = 1
 test_vol_zscore = 0
 test_adx_regime = 0
 test_range_features = 0
@@ -61,13 +64,13 @@ test_gap_sigma = 0
 test_sharpe_target = 0
 
 #testing the model
-test_model = 1
+test_model = 0
 
 #=====================================
 #useful functions
 def get_ohlcv(year, month):
     #gets data preceding a specific month, useful for testing filters
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"]) 
     target_end = pd.Timestamp(year, month, 1)
     target_start = target_end - relativedelta(months=12)
@@ -107,7 +110,7 @@ if test_advanced_stats_filter == True:
     print(results.act_symbol.unique())
 
 if test_universe == True:
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     filters = [
         TopLiquidityFilter(N = 3000),
@@ -127,7 +130,7 @@ if test_universe == True:
 
 if test_ta_lib == True:
     import talib
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df = df[df.act_symbol == "F"]
     ta_lib_sma = talib.SMA(df["close"], timeperiod = 30) #SMA FROM TA-LIB
     upper, middle, lower = talib.BBANDS(df.close) #Bollinger Bands from ta-lib
@@ -148,7 +151,7 @@ if test_ta_lib == True:
     plt.show()
 
 if test_basic_features == True:
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     df.reset_index(drop = True)
     feature = LogReturn(-5)
@@ -195,7 +198,7 @@ if test_basic_features == True:
     plt.show()
 
 if test_talib_feature == True:
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     df.reset_index(drop = True)
     #get 5 day lag 50 day SMA as a feature
@@ -215,7 +218,7 @@ if test_talib_feature == True:
 
 if test_bbands == True:
     print("Testing Bollinger Bands on Log Returns...")
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     
     # 1. Instantiate the BollingerBands class
@@ -273,7 +276,7 @@ if test_bbands == True:
 
 if test_bbands_normalized == True:
     print("Testing Normalized Bollinger Bands (%B and Bandwidth)...")
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     
     # 1. Instantiate the Normalized BB Class
@@ -343,7 +346,7 @@ if test_momentum == True:
     print("========================================")
     
     # 1. Load Data
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     
     # 2. Instantiate the Class
@@ -421,7 +424,7 @@ if test_feature_engine == True:
     
     # 1. Load Data
     try:
-        df = pd.read_feather("Data/all_ohlcv.feather")
+        df = pd.read_feather("../Data/all_ohlcv.feather")
         df["date"] = pd.to_datetime(df["date"])
         df = df[df['date'] >= "2020-01-01"].copy()
     except Exception as e:
@@ -541,7 +544,7 @@ if test_feature_engine2 == True:
     
     # 1. Load Data
     try:
-        df = pd.read_feather("Data/all_ohlcv.feather")
+        df = pd.read_feather("../Data/all_ohlcv.feather")
         df["date"] = pd.to_datetime(df["date"])
         # Filter for a specific date range
         df = df[df['date'] >= "2020-01-01"].copy()
@@ -670,7 +673,7 @@ if test_feature_engine2 == True:
 
 if test_liquidity == True:
     #get data
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
 
     #compute features
@@ -702,7 +705,7 @@ if test_liquidity == True:
 
 if test_MA_crossover == True:
     #get data
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
 
     #compute features
@@ -747,7 +750,7 @@ if test_hurst_autocorr == True:
 
     # 1. Load Data
     print("Loading data...")
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     
     # --- SPEED OPTIMIZATION ---
@@ -852,7 +855,7 @@ if test_hurst_autocorr == True:
     print("Test Complete.")
 
 if test_BETA == True:
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     beta_feature = FeatureRequest(name='pandas_beta', #moving average crossover
                                        params={'timeperiod': 50}, #get medium term beta from the past 50 days
@@ -897,7 +900,7 @@ if test_vwap_zscore == True:
     
     # 1. Load Data
     try:
-        df = pd.read_feather("Data/all_ohlcv.feather")
+        df = pd.read_feather("../Data/all_ohlcv.feather")
         df["date"] = pd.to_datetime(df["date"])
     except Exception as e:
         print(f"Error loading data: {e}")
@@ -968,7 +971,7 @@ if test_vol_zscore == True:
     
     # 1. Load Data
     try:
-        df = pd.read_feather("Data/all_ohlcv.feather")
+        df = pd.read_feather("../Data/all_ohlcv.feather")
         df["date"] = pd.to_datetime(df["date"])
     except Exception as e:
         print(f"Error loading data: {e}")
@@ -1049,7 +1052,7 @@ if test_adx_regime == True:
     
     # 1. Load Data
     try:
-        df = pd.read_feather("Data/all_ohlcv.feather")
+        df = pd.read_feather("../Data/all_ohlcv.feather")
         df["date"] = pd.to_datetime(df["date"])
     except Exception as e:
         print(f"Error loading data: {e}")
@@ -1118,7 +1121,7 @@ if test_range_features == True:
     print("========================================")
     
     try:
-        df = pd.read_feather("Data/all_ohlcv.feather")
+        df = pd.read_feather("../Data/all_ohlcv.feather")
         df["date"] = pd.to_datetime(df["date"])
     except Exception as e:
         print(f"Data error: {e}")
@@ -1192,7 +1195,7 @@ if test_gap_sigma == True:
     
     # 1. Load Data
     try:
-        df = pd.read_feather("Data/all_ohlcv.feather")
+        df = pd.read_feather("../Data/all_ohlcv.feather")
         df["date"] = pd.to_datetime(df["date"])
     except Exception as e:
         print(f"Data error: {e}")
@@ -1268,7 +1271,7 @@ if test_sharpe_target == True:
     print("Testing Forward Sharpe Target")
     # ... load data ...
     try:
-        df = pd.read_feather("Data/all_ohlcv.feather")
+        df = pd.read_feather("../Data/all_ohlcv.feather")
         df["date"] = pd.to_datetime(df["date"])
     except Exception as e:
         print(f"Data error: {e}")
@@ -1306,7 +1309,7 @@ if test_sharpe_target == True:
 if test_model == True:
     #get a universe for training the model
     print("GETTING UNIVERSE...")
-    df = pd.read_feather("Data/all_ohlcv.feather")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
     df["date"] = pd.to_datetime(df["date"])
     filters = [
         TopLiquidityFilter(N = 3000),
