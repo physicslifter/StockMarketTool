@@ -20,7 +20,10 @@ valid_targets = ["log_ret",
 talib_functions = {
     "SMA": talib.SMA,
     "EMA": talib.EMA,
-    "bollinger": talib.BBANDS
+    "bollinger": talib.BBANDS,
+    "momentum": talib.MOM,
+    "RSI": talib.RSI,
+    "MACD": talib.MACD
 }
 
 def test_valid_df(df):
@@ -114,6 +117,26 @@ class Volatility(Variable):
         else:
             result = result.groupby(df["act_symbol"]).shift(1)
         return result
+    
+class Calendar(Variable):
+    def __init__(self, num_days, calendar_type = "Month"):
+        valid_calendar_types = ["Month", "Day", "DoW"]
+        if calendar_type not in valid_calendar_types:
+            raise Exception(f"{calendar_type} is invalid. Must be one of {valid_calendar_types}")
+        super().__init__(f"{calendar_type}", num_days)
+        self.calendar_type = calendar_type
+
+    def get(self, df, num_days):
+        def get_calendar(date):
+            if self.calendar_type == "Month":
+                return date.month
+            elif self.calendar_type == "Day":
+                return date.day
+            elif self.calendar_type == "DoW":
+                return date.dayofweek
+    
+        result = df.date.apply(get_calendar)
+        return result
 
 #Original TALibVar classes
 '''class SMA(Variable):
@@ -142,11 +165,12 @@ class TALibVar(Variable):
             result = result.groupby(df["act_symbol"]).shift(1)
         return result"""'''
 class TALibVarTimePeriod(Variable):
-    def __init__(self, name, num_days, timeperiod):
+    def __init__(self, name, num_days, timeperiod, train_on_log:bool = True):
         # num_days: How far to shift (e.g., -5 for 5-day lag, +5 for 5-day future target)
         super().__init__(name, num_days)
         # timeperiod: The indicator setting (e.g., 200 for 200-day SMA)
         self.timeperiod = timeperiod
+        self.train_on_log = train_on_log
 
     def get_detailed_name(self):
         # Override the naming convention to include the timeperiod
@@ -182,11 +206,23 @@ class TALibVarTimePeriod(Variable):
             return series.shift(-num_days)
 
         #if log_ret not in dataframe, add it
-        if "log_ret" not in df.keys():
-            df["log_ret"] = np.log(df["close"] / df.close.shift(1))
+        target_key = "close" #target to calculate the variable on
+        #names of features/targets for which we want the rolling sum
+        log_price_names = [
+            "momentum",
+            "RSI",
+            "MACD"
+        ]
+        if self.train_on_log == True:
+            target_key = f"log_price" if self.name in log_price_names else "log_ret"
+            if target_key not in df.keys():
+                if target_key == "log_ret":
+                    df["log_ret"] = np.log(df["close"] / df.close.shift(1))
+                else:
+                    df[target_key] = np.log(df["close"])
 
         # Apply to each stock individually
-        result = df.groupby("act_symbol")["log_ret"].transform(calculate_and_shift)
+        result = df.groupby("act_symbol")[target_key].transform(calculate_and_shift)
         
         return result
 
