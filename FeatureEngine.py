@@ -763,7 +763,75 @@ class FeatureEngine:
             
             df = pd.concat([df, new_features], axis=1)
 
-        # -------------------------------------------------------
+        print("Phase 3: Computing Transforms & Targets...")
+        
+        # NEW: Keep track of base columns that were transformed
+        base_cols_used_for_transforms = set()
+        
+        for req in self.requests:
+            if not req.transform:
+                continue
+
+            # Identify the columns created in Phase 2
+            config = FEATURE_REGISTRY[req.name]
+            outputs = config.get('outputs', ['real'])
+            
+            for i, output_name in enumerate(outputs):
+                suffix = f"_{output_name}" if len(outputs) > 1 else ""
+                
+                # Input Column (from Phase 2)
+                base_col = req.base_col_name + suffix
+                
+                # Output Column (final name)
+                final_col = req.col_name + suffix
+                
+                if base_col not in df.columns:
+                    print(f"Warning: Base column {base_col} missing for transform.")
+                    continue
+
+                # --- APPLY TRANSFORMS ---
+                if req.transform == 'rank':
+                    df[final_col] = df.groupby('date')[base_col].rank(pct=True)
+                    
+                elif req.transform == 'demean':
+                    means = df.groupby('date')[base_col].transform('mean')
+                    df[final_col] = df[base_col] - means
+                    
+                elif req.transform == 'binary':
+                    thresh = req.transform_params.get('threshold', 0)
+                    df[final_col] = np.where(df[base_col] > thresh, 1, 0)
+                    df.loc[df[base_col].isna(), final_col] = np.nan
+                    
+                elif req.transform == 'regime':
+                    thresh = req.transform_params.get('threshold', 0.02)
+                    conditions = [
+                        (df[base_col] > thresh), 
+                        (df[base_col] < -thresh)
+                    ]
+                    choices = [1, -1]
+                    df[final_col] = np.select(conditions, choices, default=0)
+                    df.loc[df[base_col].isna(), final_col] = np.nan
+
+                # NEW: Mark this base column as a candidate for deletion
+                base_cols_used_for_transforms.add(base_col)
+
+        # NEW: Cleanup Block 
+        # Make a list of all final column names explicitly requested by the user
+        final_requested_cols = set()
+        for req in self.requests:
+            outputs = FEATURE_REGISTRY[req.name].get('outputs', ['real'])
+            for out in outputs:
+                suffix = f"_{out}" if len(outputs) > 1 else ""
+                final_requested_cols.add(req.col_name + suffix)
+
+        # Drop the base columns ONLY if they weren't explicitly requested as their own standalone feature
+        cols_to_drop = [c for c in base_cols_used_for_transforms if c not in final_requested_cols]
+        if cols_to_drop:
+            df.drop(columns=cols_to_drop, inplace=True)
+
+        return df
+
+        """# -------------------------------------------------------
         # PHASE 3: TRANSFORMS (Cross-Sectional & Targets)
         # -------------------------------------------------------
         print("Phase 3: Computing Transforms & Targets...")
@@ -815,4 +883,4 @@ class FeatureEngine:
                     df[final_col] = np.select(conditions, choices, default=0)
                     df.loc[df[base_col].isna(), final_col] = np.nan
 
-        return df
+        return df"""
