@@ -29,8 +29,9 @@ test_get_dolt_stock_data = 0
 test_get_dolt_data = 0
 test_add_release_date = 0
 test_data_alignment = 0
-test_stock_split = 0
-test_batch_stock_split = 1 
+test_stock_split = 1
+test_batch_stock_split = 0
+get_ohlcv_w_split = 0
 
 
 stock = "F"
@@ -401,3 +402,15 @@ if test_batch_stock_split == True:
     plt.suptitle("Batch vs Single-Stock Split Adjustment Verification", fontsize=16)
     plt.tight_layout()
     plt.show()
+
+if get_ohlcv_w_split == True:
+    df = pd.read_feather("Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    dr = DataReader()
+    start_date = "2011-01-01"
+    end_date = "2025-12-31"
+    stocks = list(df.act_symbol.unique())
+    dr.get_batch_stock_data(stocks_list=stocks, start_date=start_date, end_date=end_date)
+    batch_ohlcv = dr_batch.stock_data["ohlcv"]
+    batch_ohlcv.to_feather("Data/all_data_w_split.feather")
+    print("DONE")
