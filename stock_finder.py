@@ -11,7 +11,7 @@ from pdb import set_trace as st
 import numpy as np
 from datetime import date
 
-has_data = True
+has_data = False
 save_sample = False
 
 if has_data == False:
