@@ -33,7 +33,7 @@ test_operating_margin = 0 #Show PFE operating margin from 2010 to 2022
 test_fundamentals_visualizer = 0 #view fundamentals of diff stocks
 test_get_eps_CAGR = 0 #get EPS CAGR data
 test_get_dolt_stock_data = 0
-test_get_dolt_data = 0 #ERROR
+test_get_dolt_data = 1 #ERROR: Doesn't work for dolt data, only works for NASDAQ
 test_add_release_date = 0
 test_data_alignment = 0
 test_stock_split = 0 #demonstrates code is working for split
@@ -53,7 +53,7 @@ test_top_liquidity_filter = 0
 test_price_filter = 0
 test_advanced_stats_filter = 0
 test_universe = 0
-test_model = 1
+test_model = 0
 
 
 stock = "F"
@@ -310,7 +310,7 @@ if test_get_dolt_data == True:
     ax.set_ylabel("Return")
     ax.set_title("Paypal vs competitors")
     stocks = ["PYPL", "ADYEY", "BLOCK", "GPN"]
-    portfolio = Portfolio(stocks, data_type = "dolt")
+    portfolio = Portfolio(stocks, data_type = "nasdaq_csv")
     start_date = np.datetime64("2023-12-01", "D")
     end_date = np.datetime64("2025-12-10", "D")
     portfolio.chop_data(start_date, end_date)

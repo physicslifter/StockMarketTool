@@ -252,7 +252,7 @@ class Universe:
         self.master_df = master_df
         self.filters = []
         if filter_etfs == True:
-            etf_data = pd.read_feather("Data/ETFs.feather")
+            etf_data = pd.read_feather("../Data/ETFs.feather")
             etf_list = set(etf_data['act_symbol'].unique())
             self.master_df = self.master_df[~self.master_df['act_symbol'].isin(etf_list)]
 
