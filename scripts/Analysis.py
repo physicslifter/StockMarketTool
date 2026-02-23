@@ -36,9 +36,9 @@ class Stock:
                     converters = {}
                     for key in ["Close/Last", "Open", "High", "Low"]:
                         converters[key] = lambda s: float(s.replace('$', ''))
-                    self.data = pd.read_csv(f"Data/{self.name}.csv", converters = converters)
+                    self.data = pd.read_csv(f"../Data/{self.name}.csv", converters = converters)
                 else:
-                    self.data = pd.read_csv(f"Data/{self.name}.csv")
+                    self.data = pd.read_csv(f"../Data/{self.name}.csv")
             except:
                 raise Exception(f"Data for {self.name} not found")
             self.data["Date"] = pd.to_datetime(self.data["Date"])
