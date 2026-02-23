@@ -1,47 +1,52 @@
+import sys
+import os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
+
 import pandas as pd
 from matplotlib import pyplot as plt
 from matplotlib import dates
 from scipy.stats import norm, t
 import numpy as np
 from pdb import set_trace as st
-from sim_strat1 import StockData
 plt.style.use('dark_background')
 from Analysis import *
 from DoltReader import *
+from NASDAQ_Data import StockData
 
-show_all_data = 0
+#working w/ NASDAQ data
+show_all_data = 0 #show all NASDAQ data for F
 show_daily_changes = 0
 test_class = 0
-test_analysis_plot = 0
-test_analysis_comparison_plot = 0
-test_baseline_compare = 0
-compare_beverage_stocks = 0
-test_show_portfolio_mix = 0
-test_portfolio_performance_against_mean = 0
-compare_pharma = 0
-test_read_dolt_data = 0
+test_analysis_plot = 0 #show cumulative returns for GM
+test_analysis_comparison_plot = 0 #show comparative returns for US automakers (F, GM & STLA)
+test_baseline_compare = 0 #show GM returns vs SPY baseline
+compare_beverage_stocks = 0 #show comparative returns of US beverage companies (KO, PEP & KDP) vs SPY
+test_show_portfolio_mix = 0 #show comparative returns of US beverage companies vs sector avg
+test_portfolio_performance_against_mean = 0 #plot comparison of PAYPAL to competitors
+compare_pharma = 0 #Compare PFE to NVS
+
+#working w/ Dolt data
 test_get_earnings_data = 0
-test_ROIC = 0
-test_operating_margin = 0
+test_ROIC = 0 #show F ROIC from 2010 to 2022
+test_operating_margin = 0 #Show PFE operating margin from 2010 to 2022
 test_fundamentals_visualizer = 0 #view fundamentals of diff stocks
 test_get_eps_CAGR = 0 #get EPS CAGR data
 test_get_dolt_stock_data = 0
-test_get_dolt_data = 0
+test_get_dolt_data = 0 #ERROR
 test_add_release_date = 0
 test_data_alignment = 0
-test_stock_split = 1
+test_stock_split = 0 #demonstrates code is working for split
 test_batch_stock_split = 0
-get_ohlcv_w_split = 0
 
 
 stock = "F"
 if stock in ["SPY"]:
-    df = pd.read_csv(f"Data/{stock}.csv")
+    df = pd.read_csv(f"../Data/{stock}.csv")
 elif stock in ["F", "PFE", "AMC", "STLA", "GM", "BA", "MSTR", "BNDW", "ROBO", "BB", "AI", "GRAB", "SCHD"]:
     converters = {}
     for key in ["Close/Last", "Open", "High", "Low"]:
         converters[key] = lambda s: float(s.replace('$', ''))
-    df = pd.read_csv(f"Data/{stock}.csv", converters = converters)
+    df = pd.read_csv(f"../Data/{stock}.csv", converters = converters)
 df = df.iloc[::-1].reset_index(drop = True)
 df["log_ret"] = np.log(df["Close/Last"]/df["Open"])
 
@@ -402,15 +407,3 @@ if test_batch_stock_split == True:
     plt.suptitle("Batch vs Single-Stock Split Adjustment Verification", fontsize=16)
     plt.tight_layout()
     plt.show()
-
-if get_ohlcv_w_split == True:
-    df = pd.read_feather("Data/all_ohlcv.feather")
-    df["date"] = pd.to_datetime(df["date"])
-    dr = DataReader()
-    start_date = "2011-01-01"
-    end_date = "2025-12-31"
-    stocks = list(df.act_symbol.unique())
-    dr.get_batch_stock_data(stocks_list=stocks, start_date=start_date, end_date=end_date)
-    batch_ohlcv = dr_batch.stock_data["ohlcv"]
-    batch_ohlcv.to_feather("Data/all_data_w_split.feather")
-    print("DONE")
