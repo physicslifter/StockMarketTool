@@ -12,6 +12,7 @@ plt.style.use('dark_background')
 from Analysis import *
 from DoltReader import *
 from NASDAQ_Data import StockData
+from clean_analysis import *
 
 #working w/ NASDAQ data
 show_all_data = 0 #show all NASDAQ data for F
@@ -37,6 +38,22 @@ test_add_release_date = 0
 test_data_alignment = 0
 test_stock_split = 0 #demonstrates code is working for split
 test_batch_stock_split = 0
+
+'''
+Filter tests
+
+test_top_liquidity_filter: demonstrates liquidity filter is working
+test_price_filter: demonstrates price filter is working
+test_advanced_stats_filter: demonstrates advanced stats filter is working
+test_universe: demonstrates that Universe() class works
+test_model: tests the model from clean_analysis.py
+'''
+#tests for clean_analysis.py
+test_top_liquidity_filter = 0 
+test_price_filter = 0
+test_advanced_stats_filter = 0
+test_universe = 0
+test_model = 1
 
 
 stock = "F"
@@ -407,3 +424,88 @@ if test_batch_stock_split == True:
     plt.suptitle("Batch vs Single-Stock Split Adjustment Verification", fontsize=16)
     plt.tight_layout()
     plt.show()
+
+#tests for classes in clean_analysis.py
+#get data for filter tests
+if test_top_liquidity_filter + test_price_filter + test_advanced_stats_filter > 0:
+    #get data for November 2025
+    month_df = get_ohlcv(2025, 12)
+    target_date = pd.Timestamp(2025, 12, 1)
+
+if test_top_liquidity_filter == True:
+    #prove liquidity filter works 
+    filter = TopLiquidityFilter(N = 10)
+    results = filter.apply(df = month_df, target_date = target_date)
+    print(results.act_symbol.unique())
+
+if test_price_filter == True:
+    filter = PriceFilter(min_price = 15)
+    results = filter.apply(month_df, target_date)
+    print(results.nsmallest(10, "open"))
+
+if test_advanced_stats_filter == True:
+    filter = AdvancedStatsFilter(max_crash = 0.5, volatility_n = 10, require_uptrend = True)
+    results = filter.apply(month_df, target_date)
+    print(results.act_symbol.unique())
+
+if test_universe == True:
+    df = pd.read_feather("../Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    filters = [
+        TopLiquidityFilter(N = 3000),
+        PriceFilter(min_price = 5),
+        AdvancedStatsFilter(min_history_days = None,
+                            max_crash = -0.5,
+                            require_uptrend = None,
+                            volatility_n = 1000)
+    ]
+    universe = Universe(master_df = df)
+    universe.add_filters(filters)
+    dates = [pd.Timestamp("2020-01-01"), pd.Timestamp("2021-01-01")]
+    universe_data = universe.get_all_universe_data(dates = dates)
+    test_universe_data = pd.read_feather("Data/test_training_universe.feather")
+    test = test_universe_data.drop(columns = ["hurst_1y"])
+    print(universe_data.equals(test))
+
+if test_model == True:
+    #get a universe for training the model
+    print("GETTING UNIVERSE...")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    filters = [
+        TopLiquidityFilter(N = 3000),
+        PriceFilter(min_price = 5),
+        AdvancedStatsFilter(min_history_days = None,
+                            max_crash = -0.5,
+                            require_uptrend = None,
+                            volatility_n = 1000)
+    ]
+    universe = Universe(master_df = df)
+    universe.add_filters(filters)
+    dates = [pd.Timestamp("2020-01-01"), pd.Timestamp("2021-01-01")]
+    universe_data = universe.get_all_universe_data(dates = dates)
+
+    #define model
+    model = Model(universe_data)
+
+    #define features & add
+    volatility = FeatureRequest(name='VOL_ZSCORE', 
+                                         params={'timeperiod': 20}, 
+                                         shift=-1, 
+                                         input_type='raw',
+                                         alias='vol_z')
+    liquidity = FeatureRequest(name='SPREAD_AR', params={'timeperiod': 20}, shift=-1, alias='liquidity', transform='rank')
+    autocorrelation = FeatureRequest(name='AUTOCORR', 
+                                   params={'timeperiod': 20}, 
+                                   shift=-1, 
+                                   alias='auto_corr', 
+                                   input_type='log_ret')
+    z_score = FeatureRequest(name='ZSCORE', params={'timeperiod': 20}, shift=-1, input_type='log_ret', alias='vol_zscore')
+    model.add_features([volatility, liquidity, autocorrelation, z_score])
+
+    #define target & add
+    target = FeatureRequest(name='SUM', params={'timeperiod': 5}, shift=1, input_type='log_ret', alias='target_5d', transform='binary')
+    model.add_target(target)
+    #split data for training
+    model.split_data(cutoffs = [0.7, 0.85, 1])
+    model.train_model(save_name = "clean_model_test")
