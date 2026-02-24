@@ -3,6 +3,11 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "scripts"
+# Change this to the actual name of your package
+name = "package" 
 version = "0.1.0"
 description = "Stock Market Analysis Tools"
+
+# This tells setuptools to look inside the "scripts" folder for your package(s)
+[tool.setuptools.packages.find]
+where = ["scripts"]
