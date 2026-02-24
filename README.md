@@ -2,7 +2,7 @@
 Tool for analyzing stock data and backtesting strategies
 
 # How to use
-## 1. Setup dolt sql databases from 
+## 1. Setup dolt sql databases
 Databases @: https://www.dolthub.com/repositories/post-no-preference
   
 ### 1.1. Create a new empty directory to put the databases in 
