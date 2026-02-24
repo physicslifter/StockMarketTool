@@ -28,12 +28,17 @@ dolt status
 cd ..
 ```
 The output to each 'dolt status' command should look like:
-```On branch master
+```
+On branch master
 Your branch is up to date with 'origin/master'.
 nothing to commit, working tree clean
 ```
 
 ### 1.4. Run tests/test_dolt_databases.py to ensure data functionality is working properly.  
+```
+cd tests
+python3 test_dolt_databases.py
+```
   
 ## 2. Set up python environment  
   -  run setup.py to install libraries and generate data from the database
