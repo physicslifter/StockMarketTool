@@ -46,7 +46,7 @@ dolt sql-server
 ```
 to activate the databases.
 
-### 1.5. Run tests/test_dolt_databases.py to ensure data functionality is working properly.  
+### 2.5. Run tests/test_dolt_databases.py to ensure data functionality is working properly.  
 ```
 cd tests
 python3 test_dolt_databases.py
@@ -54,5 +54,12 @@ python3 test_dolt_databases.py
 The output should say 'SUCCESS'
 If the output says something different, the python code is not able to read from the databases. Try setting up databases again. Make sure you have activated the databases from the parent folder. If this is not working, please open a new issue in the repository.
 
-## 3. Create a Universe  
-## 4. Create a model from the universe
+## 3. Setup repository with useful data
+You can read in data each time you train a model with the DoltReader functions. However, it is often more effecient to save the data locally as a feather file. If you do not specify a dataframe for the universe or model, the classes automatically pull this saved feather file as the universe.
+```
+cd DataRetrieval
+python3 setup_data.py
+```
+## 4. Create a Universe  
+## 5. Create Features for the model
+## 6. Train model
