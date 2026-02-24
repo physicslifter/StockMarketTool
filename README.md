@@ -46,6 +46,8 @@ to activate the databases.
 cd tests
 python3 test_dolt_databases.py
 ```
+The output should say 'SUCCESS'
+If the output says something different, the python code is not able to read from the databases. Try setting up databases again. If this is not working, please open a new issue in the repository.
   
 ## 2. Set up python environment  
   -  run setup.py to install libraries and generate data from the database
