@@ -1,26 +1,29 @@
 # StockMarketTool
 Tool for analyzing stock data and backtesting strategies
 
-# How to use
-1. [1. Setup dolt sql database] (## setup-dolt-sql-databases)
-2.   
-## Setup dolt sql databases
+## 1. Setup the repository as a python package
+In the main folder, run:
+```
+pip install -e .
+```
+
+## 2. Setup dolt sql databases
 Databases @: https://www.dolthub.com/repositories/post-no-preference
   
-### 1.1. Create a new empty directory to put the databases in 
+### 2.1. Create a new empty directory to put the databases in 
 Somewhere convenient on your computer (doesn't have to be in this repo)
 ```
 mkdir post-no-preference-data
 cd post-no-preference-data
 ```
   
-### 1.2. Use dolt to get the databases onto your computer  
+### 2.2. Use dolt to get the databases onto your computer  
 ```
 dolt clone https://www.dolthub.com/repositories/post-no-preference/earnings
 dolt clone https://www.dolthub.com/repositories/post-no-preference/stocks
 ```  
   
-### 1.3. Go into each database to make sure it is working properly
+### 2.3. Go into each database to make sure it is working properly
 ```
 cd stocks
 dolt status
@@ -36,7 +39,7 @@ Your branch is up to date with 'origin/master'.
 nothing to commit, working tree clean
 ```
 
-### 1.4 Activate the server
+### 2.4 Activate the server
 in /post-no-preference-data, run
 ```
 dolt sql-server
@@ -50,9 +53,6 @@ python3 test_dolt_databases.py
 ```
 The output should say 'SUCCESS'
 If the output says something different, the python code is not able to read from the databases. Try setting up databases again. Make sure you have activated the databases from the parent folder. If this is not working, please open a new issue in the repository.
-  
-## 2. Set up python environment  
-  -  run setup.py to install libraries and generate data from the database
 
 ## 3. Create a Universe  
 ## 4. Create a model from the universe
