@@ -3,7 +3,35 @@ Tool for analyzing stock data and backtesting strategies
 
 # How to use
 ## 1. Setup dolt sql databases from 
-Databases @: https://www.dolthub.com/repositories/post-no-preference  
+Databases @: https://www.dolthub.com/repositories/post-no-preference
+  
+### 1.1. Create a new empty directory to put the databases in 
+Somewhere convenient on your computer (doesn't have to be in this repo)
+```
+mkdir post-no-preference-data
+cd post-no-preference-data
+```
+  
+### 1.2. Use dolt to get the databases onto your computer  
+```
+dolt clone https://www.dolthub.com/repositories/post-no-preference/earnings
+dolt clone https://www.dolthub.com/repositories/post-no-preference/stocks
+```  
+  
+### 1.3. Go into each database to make sure it is working properly
+```
+cd stocks
+dolt status
+
+cd ../earnings
+dolt status
+cd ..
+```
+The output to each 'dolt status' command should look like:
+```On branch master
+Your branch is up to date with 'origin/master'.
+nothing to commit, working tree clean
+```
 
 ## 2. Set up python environment  
   -  run setup.py to install libraries and generate data from the database  
