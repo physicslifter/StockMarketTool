@@ -34,7 +34,14 @@ Your branch is up to date with 'origin/master'.
 nothing to commit, working tree clean
 ```
 
-### 1.4. Run tests/test_dolt_databases.py to ensure data functionality is working properly.  
+### 1.4 Activate the server
+in /post-no-preference-data, run
+```
+dolt sql-server
+```
+to activate the databases.
+
+### 1.5. Run tests/test_dolt_databases.py to ensure data functionality is working properly.  
 ```
 cd tests
 python3 test_dolt_databases.py
