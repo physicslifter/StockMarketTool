@@ -6,9 +6,6 @@ Clean file for demonstrating every feature
 Order of Features:
     1. Price momentum: show price momentum over past year vs price.
 '''
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
 import pandas as pd
 from FeatureEngine import *
 from matplotlib import pyplot as plt

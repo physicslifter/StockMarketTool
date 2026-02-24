@@ -1,7 +1,3 @@
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
-
 import pandas as pd
 from matplotlib import pyplot as plt
 from matplotlib import dates
@@ -33,11 +29,11 @@ test_operating_margin = 0 #Show PFE operating margin from 2010 to 2022
 test_fundamentals_visualizer = 0 #view fundamentals of diff stocks
 test_get_eps_CAGR = 0 #get EPS CAGR data
 test_get_dolt_stock_data = 0
-test_get_dolt_data = 1 #ERROR: Doesn't work for dolt data, only works for NASDAQ
+test_get_dolt_data = 0 #ERROR: Doesn't work for dolt data, only works for NASDAQ
 test_add_release_date = 0
 test_data_alignment = 0
 test_stock_split = 0 #demonstrates code is working for split
-test_batch_stock_split = 0
+test_batch_stock_split = 1
 
 '''
 Filter tests
@@ -379,6 +375,7 @@ if test_batch_stock_split == True:
     print(f"Running Batch Retrieval for {stocks}...")
     dr_batch.get_batch_stock_data(stocks_list=stocks, start_date=start_date, end_date=end_date)
     batch_ohlcv = dr_batch.stock_data["ohlcv"]
+    st()
 
     fig = plt.figure(figsize=(12, 10))
     

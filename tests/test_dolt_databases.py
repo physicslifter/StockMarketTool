@@ -6,9 +6,6 @@ Test logic:
 2. Demonstrate stock splits
     If this works then the heart of the logic is working correctly
 """
-import sys
-import os
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'scripts')))
 from DoltReader import *
 
 try:
