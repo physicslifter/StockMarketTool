@@ -458,6 +458,7 @@ class Model:
         feature_engine = FeatureEngine(feature_requests = self.features + [self.target])
         self.data = feature_engine.compute(self.data)
         #drop rows where targets and features are none
+        print(self.data.keys())
         feature_keys = [key for key in self.data.keys() if "F" in key.split("_")]
         target_key = [key for key in self.data.keys() if "T" in key.split("_")][0]
         self.data = self.data.dropna(subset = feature_keys + [target_key]) #drop rows with nan for features or targets

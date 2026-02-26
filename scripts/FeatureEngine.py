@@ -343,6 +343,19 @@ def calc_forward_sharpe(close, timeperiod=5):
     
     return sharpe.values
 
+def calc_intraday_log_ret(open_p, close_p, timeperiod=1):
+    """
+    Calculates the intraday log return: ln(Close / Open) for the same day.
+    timeperiod is included as a kwarg to satisfy the engine's dynamic calling format.
+    """
+    # Safety: avoid division by zero or log of negative numbers
+    open_p = np.where(open_p <= 0, np.nan, open_p)
+    close_p = np.where(close_p <= 0, np.nan, close_p)
+    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        intraday_ret = np.log(close_p / open_p)
+        
+    return intraday_ret
 
 # ==========================================
 # 1. THE REGISTRY
@@ -476,6 +489,14 @@ FEATURE_REGISTRY = {
         'inputs': ['close'], # We calculate returns internally
         'outputs': ['real']
     },
+
+    'INTRADAY_LOG_RET': {
+        'type': 'custom_stat',
+        'fn': calc_intraday_log_ret,
+        'inputs':['open', 'close'],  # Tells the engine to fetch the open and close arrays
+        'outputs': ['real']
+    },
+
 }
 
 # ==========================================
@@ -507,7 +528,7 @@ class FeatureRequest:
         self.transform_params = transform_params if transform_params else {}
         
         # --- Naming Logic ---
-        if shift > 0: type_suffix = "T"
+        if shift >= 0: type_suffix = "T"
         elif shift < 0: type_suffix = "F"
         else: type_suffix = "C"
         

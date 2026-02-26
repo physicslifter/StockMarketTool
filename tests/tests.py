@@ -33,7 +33,10 @@ test_get_dolt_data = 0 #ERROR: Doesn't work for dolt data, only works for NASDAQ
 test_add_release_date = 0
 test_data_alignment = 0
 test_stock_split = 0 #demonstrates code is working for split
-test_batch_stock_split = 1
+test_batch_stock_split = 0
+
+#demoing model
+test_model = 1
 
 '''
 Filter tests
@@ -49,7 +52,7 @@ test_top_liquidity_filter = 0
 test_price_filter = 0
 test_advanced_stats_filter = 0
 test_universe = 0
-test_model = 0
+test_model = 1
 
 
 stock = "F"
@@ -501,8 +504,9 @@ if test_model == True:
     model.add_features([volatility, liquidity, autocorrelation, z_score])
 
     #define target & add
-    target = FeatureRequest(name='SUM', params={'timeperiod': 5}, shift=1, input_type='log_ret', alias='target_5d', transform='binary')
+    target = FeatureRequest(name='INTRADAY_LOG_RET', shift=0, input_type = "raw", alias='ILR', transform = "classification")
     model.add_target(target)
     #split data for training
     model.split_data(cutoffs = [0.7, 0.85, 1])
+    st()
     model.train_model(save_name = "clean_model_test")
