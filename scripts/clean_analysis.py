@@ -21,7 +21,7 @@ from dateutil.relativedelta import relativedelta
 import lightgbm as lgb
 import optuna
 import matplotlib.pyplot as plt
-from sklearn.metrics import accuracy_score, roc_auc_score, log_loss
+from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, mean_squared_error
 import warnings
 from FeatureEngine import *
 from pdb import set_trace as st
@@ -357,6 +357,25 @@ class Model:
         self.params_tuned = False
         self.variables_generated = False
 
+    def add_target(self, target, target_type:str = "regression"):
+        valid_target_types = ["classification", "regression"]
+        if target_type not in valid_target_types:
+            err_msg = "Invalid target_type. Must be one of: "
+            for c, i in enumerate(valid_target_types):
+                err_msg += i
+                if c < len(valid_target_types) - 1:
+                    err_msg += ", "
+        self.target = target
+        self.target_type = target_type
+        self.has_target = True
+
+    def add_features(self, features):
+        '''
+        Adds features to the dataset
+        '''
+        self.features = features
+        self.has_features = True
+
     def split_data(self,
                    cutoffs:list = None
                    ):
@@ -398,56 +417,73 @@ class Model:
             raise Exception("Data must be split before tuning params")
         print("TUNING PARAMS...")
         #objective function for tuning params
-        def objective(trial):
-            param = {
-                "objective": "binary",
-                "metric": "auc", 
-                "verbosity": -1,
-                "boosting_type": "gbdt",
-                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1),
-                "num_leaves": trial.suggest_int("num_leaves", 20, 150),
-                "max_depth": trial.suggest_int("max_depth", 3, 10),
-                "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 100, 1000),
-                "lambda_l1": trial.suggest_float("lambda_l1", 1e-3, 10.0, log=True),
-                "lambda_l2": trial.suggest_float("lambda_l2", 1e-3, 10.0, log=True),
-                "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
-                "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
-                "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
-                "seed": 42
-            }
+        if self.target_type == "classification":
+            def objective(trial):
+                param = {
+                    "objective": "binary",
+                    "metric": "auc", 
+                    "verbosity": -1,
+                    "boosting_type": "gbdt",
+                    "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1),
+                    "num_leaves": trial.suggest_int("num_leaves", 20, 150),
+                    "max_depth": trial.suggest_int("max_depth", 3, 10),
+                    "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 100, 1000),
+                    "lambda_l1": trial.suggest_float("lambda_l1", 1e-3, 10.0, log=True),
+                    "lambda_l2": trial.suggest_float("lambda_l2", 1e-3, 10.0, log=True),
+                    "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+                    "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+                    "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
+                    "seed": 42
+                }
 
-            # Weights logic
-            train_weights = np.log1p(np.abs(self.train_df[self.target_key]) * 100)
+                # Weights logic
+                train_weights = np.log1p(np.abs(self.train_df[self.target_key]) * 100)
 
-            dtrain = lgb.Dataset(self.X_train, label=self.y_train, weight=train_weights)
-            dval = lgb.Dataset(self.X_val, label=self.y_val, reference=dtrain)
+                dtrain = lgb.Dataset(self.X_train, label=self.y_train, weight=train_weights)
+                dval = lgb.Dataset(self.X_val, label=self.y_val, reference=dtrain)
 
-            gbm = lgb.train(
-                param, dtrain, valid_sets=[dval],
-                callbacks=[
-                    lgb.early_stopping(stopping_rounds=20), 
-                    optuna.integration.LightGBMPruningCallback(trial, "auc") 
-                ]
-            )
+                gbm = lgb.train(
+                    param, dtrain, valid_sets=[dval],
+                    callbacks=[
+                        lgb.early_stopping(stopping_rounds=20), 
+                        optuna.integration.LightGBMPruningCallback(trial, "auc") 
+                    ]
+                )
 
-            preds = gbm.predict(self.X_val)
-            return roc_auc_score(self.y_val, preds)
+                preds = gbm.predict(self.X_val)
+                return roc_auc_score(self.y_val, preds)
+        elif self.target_type == "regression":
+            def objective(trial):
+                param = {
+                    "objective": "regression",
+                    "metric": "rmse",
+                    "verbosity": -1,
+                    "boosting_type": "gbdt",
+                    "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1),
+                    "num_leaves": trial.suggest_int("num_leaves", 20, 150),
+                    "max_depth": trial.suggest_int("max_depth", 3, 10),
+                    "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 100, 1000),
+                    "lambda_l1": trial.suggest_float("lambda_l1", 1e-3, 10.0, log=True),
+                    "lambda_l2": trial.suggest_float("lambda_l2", 1e-3, 10.0, log=True),
+                    "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+                    "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
+                    "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
+                    "seed": 42
+                }
+
+                dtrain = lgb.Dataset(self.X_train, label=self.y_train)
+                dval = lgb.Dataset(self.X_val, label=self.y_val, reference=dtrain)
+
+                gbm = lgb.train(
+                    param, dtrain, valid_sets=[dval],
+                    callbacks=[lgb.early_stopping(stopping_rounds=20), optuna.integration.LightGBMPruningCallback(trial, "rmse")]
+                )
+                return np.sqrt(mean_squared_error(self.y_val, gbm.predict(self.X_val)))
 
         study = optuna.create_study(direction="maximize") 
         study.optimize(objective, n_trials=20)
         self.best_params = study.best_params
         self.params_tuned = True
-
-    def add_target(self, target):
-        self.target = target
-        self.has_target = True
-
-    def add_features(self, features):
-        '''
-        Adds features to the dataset
-        '''
-        self.features = features
-        self.has_features = True
 
     def generate_targets_and_features(self):
         if self.has_features == False:
