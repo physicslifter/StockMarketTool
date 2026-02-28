@@ -481,7 +481,7 @@ class Model:
                 return np.sqrt(mean_squared_error(self.y_val, gbm.predict(self.X_val)))
 
         study = optuna.create_study(direction="maximize") 
-        study.optimize(objective, n_trials=20)
+        study.optimize(objective, n_trials=500)
         self.best_params = study.best_params
         self.params_tuned = True
 
