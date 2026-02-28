@@ -35,9 +35,6 @@ test_data_alignment = 0
 test_stock_split = 0 #demonstrates code is working for split
 test_batch_stock_split = 0
 
-#demoing model
-test_model = 1
-
 '''
 Filter tests
 
@@ -53,6 +50,7 @@ test_price_filter = 0
 test_advanced_stats_filter = 0
 test_universe = 0
 test_model = 1
+test_intraday_log_ret = 0
 
 
 stock = "F"
@@ -482,7 +480,7 @@ if test_model == True:
     ]
     universe = Universe(master_df = df)
     universe.add_filters(filters)
-    dates = [pd.Timestamp("2020-01-01"), pd.Timestamp("2021-01-01")]
+    dates = [pd.Timestamp("2025-01-01"), pd.Timestamp("2026-02-01")]
     universe_data = universe.get_all_universe_data(dates = dates)
 
     #define model
@@ -504,9 +502,18 @@ if test_model == True:
     model.add_features([volatility, liquidity, autocorrelation, z_score])
 
     #define target & add
-    target = FeatureRequest(name='INTRADAY_LOG_RET', shift=0, input_type = "raw", alias='ILR', transform = "classification")
-    model.add_target(target)
+    target = FeatureRequest(name='INTRADAY_LOG_RET', shift=0, input_type = "raw", alias='ILR', transform = "binary")
+    model.add_target(target, target_type = "classification")
     #split data for training
     model.split_data(cutoffs = [0.7, 0.85, 1])
     st()
     model.train_model(save_name = "clean_model_test")
+
+if test_intraday_log_ret == True:
+    target = FeatureRequest(name='INTRADAY_LOG_RET', shift=0, input_type = "raw", alias='ILR', transform = "binary")
+    df = pd.read_feather("../Data/all_ohlcv.feather")
+    df["date"] = pd.to_datetime(df["date"])
+    data = df
+    fe = FeatureEngine([target])
+    data = fe.compute(data)
+    st()
