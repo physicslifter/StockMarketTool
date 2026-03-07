@@ -49,8 +49,9 @@ test_top_liquidity_filter = 0
 test_price_filter = 0
 test_advanced_stats_filter = 0
 test_universe = 0
-test_model = 1
+test_model = 0
 test_intraday_log_ret = 0
+test_model2 = 1
 
 
 stock = "F"
@@ -517,3 +518,32 @@ if test_intraday_log_ret == True:
     fe = FeatureEngine([target])
     data = fe.compute(data)
     st()
+
+if test_model2 == True:
+    universe_data = pd.read_feather("../Data/Universes/1.feather")
+
+    #define model
+    model = Model(universe_data)
+
+    #define features & add
+    volatility = FeatureRequest(name='VOL_ZSCORE', 
+                                         params={'timeperiod': 20}, 
+                                         shift=-1, 
+                                         input_type='raw',
+                                         alias='vol_z')
+    liquidity = FeatureRequest(name='SPREAD_AR', params={'timeperiod': 20}, shift=-1, alias='liquidity', transform='rank')
+    autocorrelation = FeatureRequest(name='AUTOCORR', 
+                                   params={'timeperiod': 20}, 
+                                   shift=-1, 
+                                   alias='auto_corr', 
+                                   input_type='log_ret')
+    z_score = FeatureRequest(name='ZSCORE', params={'timeperiod': 20}, shift=-1, input_type='log_ret', alias='vol_zscore')
+    model.add_features([volatility, liquidity, autocorrelation, z_score])
+
+    #define target & add
+    target = FeatureRequest(name='INTRADAY_LOG_RET', shift=0, input_type = "raw", alias='ILR', transform = "binary")
+    model.add_target(target, target_type = "classification")
+    #split data for training
+    model.split_data(cutoffs = [0.7, 0.85, 1])
+    st()
+    model.train_model(save_name = "clean_model_test")
