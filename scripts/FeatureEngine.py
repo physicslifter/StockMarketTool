@@ -363,9 +363,9 @@ def calc_intraday_log_ret(open_p, close_p, timeperiod=1):
 FEATURE_REGISTRY = {
     # --- TA-LIB INDICATORS ---
     'MOM':      {'type': 'talib', 'fn': talib.MOM,      'outputs': ['real']},
-    'ROC':      {'type': 'talib', 'fn': talib.ROC,      'outputs': ['real']},
-    'RSI':      {'type': 'talib', 'fn': talib.RSI,      'outputs': ['real']},
-    'MACD':     {'type': 'talib', 'fn': talib.MACD,     'outputs': ['macd', 'macdsignal', 'macdhist']},
+    'ROC':      {'type': 'talib', 'fn': talib.ROC,      'outputs': ['real'], "inputs": ["close"]},
+    'RSI':      {'type': 'talib', 'fn': talib.RSI,      'outputs': ['real'], 'inputs': ['close']},
+    'MACD':     {'type': 'talib', 'fn': talib.MACD,     'outputs': ['macd', 'macdsignal', 'macdhist'], "inputs": ["close"]},
     'SLOPE':    {'type': 'talib', 'fn': talib.LINEARREG_SLOPE, 'outputs': ['real']},
     'ANGLE':    {'type': 'talib', 'fn': talib.LINEARREG_ANGLE, 'outputs': ['real']},
     'TSF':      {'type': 'talib', 'fn': talib.TSF,      'outputs': ['real']}, 
@@ -702,6 +702,7 @@ class FeatureEngine:
                 result_cols = {}
 
                 for req in other_reqs:
+                    print(req.name)
                     config = FEATURE_REGISTRY[req.name]
                     ftype = config['type']
                     
@@ -718,6 +719,7 @@ class FeatureEngine:
                             args.append(src[input_name])
                     else:
                         if req.input_type == "raw":
+                            print(config)
                             args.append(data_map[req.input_type][config["inputs"][0]])
                         else:
                             args.append(data_map[req.input_type]['real'])
@@ -790,6 +792,7 @@ class FeatureEngine:
         base_cols_used_for_transforms = set()
         
         for req in self.requests:
+            print(req.name)
             if not req.transform:
                 continue
 
