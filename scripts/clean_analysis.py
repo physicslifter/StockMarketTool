@@ -25,6 +25,7 @@ from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, mean_square
 import warnings
 from FeatureEngine import *
 from pdb import set_trace as st
+import os
 
 def calculate_metrics_single(ticker, prices):
     """
@@ -392,6 +393,7 @@ class Model:
             raise Exception(f"Test cutoff {cutoffs[2]} must be larger than validation cutoff {cutoffs[1]}")
         unique_dates = sorted(self.data['date'].unique())
         print(len(unique_dates), int(len(unique_dates) * cutoffs[0]), int(len(unique_dates) * cutoffs[1]), int(len(unique_dates) * cutoffs[2]))
+        #st()
         train_cutoff = unique_dates[int(len(unique_dates) * cutoffs[0])]
         val_cutoff = unique_dates[int(len(unique_dates) * cutoffs[1])]
         test_cutoff = unique_dates[int(len(unique_dates) * cutoffs[2]) - 1]
@@ -418,6 +420,7 @@ class Model:
         print("TUNING PARAMS...")
         #objective function for tuning params
         if self.target_type == "classification":
+            direction = "maximize"
             def objective(trial):
                 param = {
                     "objective": "binary",
@@ -453,6 +456,7 @@ class Model:
                 preds = gbm.predict(self.X_val)
                 return roc_auc_score(self.y_val, preds)
         elif self.target_type == "regression":
+            direction = "minimize"
             def objective(trial):
                 param = {
                     "objective": "regression",
@@ -480,7 +484,7 @@ class Model:
                 )
                 return np.sqrt(mean_squared_error(self.y_val, gbm.predict(self.X_val)))
 
-        study = optuna.create_study(direction="maximize") 
+        study = optuna.create_study(direction=direction) 
         study.optimize(objective, n_trials=500)
         self.best_params = study.best_params
         self.params_tuned = True
@@ -494,7 +498,7 @@ class Model:
         feature_engine = FeatureEngine(feature_requests = self.features + [self.target])
         self.data = feature_engine.compute(self.data)
         #drop rows where targets and features are none
-        print(self.data.keys())
+        print(self.data.keys(), len(self.data))
         feature_keys = [key for key in self.data.keys() if "F" in key.split("_")]
         target_key = [key for key in self.data.keys() if "T" in key.split("_")][0]
         self.data = self.data.dropna(subset = feature_keys + [target_key]) #drop rows with nan for features or targets
@@ -510,7 +514,7 @@ class Model:
             )
         self.test_model()
         if type(save_name) != type(None):
-            self.model.save_model("Data/{save_name}.txt")
+            self.model.save_model(f"Data/{save_name}.txt")
 
     def test_model(self):
         """Tests the model after generating
