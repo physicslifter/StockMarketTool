@@ -541,8 +541,8 @@ if test_model2 == True:
     model.add_features([volatility, liquidity, autocorrelation, z_score])
 
     #define target & add
-    target = FeatureRequest(name='INTRADAY_LOG_RET', shift=0, input_type = "raw", alias='ILR', transform = "binary")
-    model.add_target(target, target_type = "classification")
+    target = FeatureRequest(name='INTRADAY_LOG_RET', shift=0, input_type = "raw", alias='ILR')
+    model.add_target(target, target_type = "regression")
     #split data for training
     model.split_data(cutoffs = [0.7, 0.85, 1])
     st()

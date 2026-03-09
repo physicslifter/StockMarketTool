@@ -222,3 +222,4 @@ Data/all_training_data.feather
 *.feather
 model_explorer.py
 /Explorers
+Data/Universes/README.txt
