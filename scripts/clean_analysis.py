@@ -485,7 +485,7 @@ class Model:
                 return np.sqrt(mean_squared_error(self.y_val, gbm.predict(self.X_val)))
 
         study = optuna.create_study(direction=direction) 
-        study.optimize(objective, n_trials=500)
+        study.optimize(objective, n_trials=50)
         self.best_params = study.best_params
         self.params_tuned = True
 
@@ -519,14 +519,24 @@ class Model:
     def test_model(self):
         """Tests the model after generating
         """
-        test_probs = self.model.predict(self.X_test)
-        self.test_df["prob_up"] = test_probs
-        test_preds_class = (test_probs > 0.5).astype(int)
-        print("MODEL ACCURACY\n========")
-        acc = accuracy_score(self.y_test_bin, test_preds_class)
-        auc = roc_auc_score(self.y_test_bin, test_probs)
-        print(f"accuracy: {acc}")
-        print(f"auc - roc: {auc}")
+        predictions = self.model.predict(self.X_test)
+        
+        if self.target_type == "classification":
+            self.test_df["prob_up"] = predictions
+            test_preds_class = (predictions > 0.5).astype(int)
+            print("MODEL ACCURACY\n========")
+            acc = accuracy_score(self.y_test_bin, test_preds_class)
+            auc = roc_auc_score(self.y_test_bin, predictions)
+            print(f"accuracy: {acc}")
+            print(f"auc - roc: {auc}")
+            
+        elif self.target_type == "regression":
+            self.test_df["pred_return"] = predictions
+            print("MODEL ERROR\n========")
+            rmse = np.sqrt(mean_squared_error(self.y_test_bin, predictions))
+            dir_acc = ((self.y_test_bin > 0) == (predictions > 0)).mean()
+            print(f"rmse: {rmse}")
+            print(f"directional accuracy: {dir_acc}")
         lgb.plot_importance(self.model, importance_type = 'gain', figsize = (10, 6), title = "Feature Importance")
         plt.tight_layout()
         plt.show()
