@@ -21,11 +21,13 @@ from dateutil.relativedelta import relativedelta
 import lightgbm as lgb
 import optuna
 import matplotlib.pyplot as plt
-from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, mean_squared_error
+from sklearn.metrics import accuracy_score, roc_auc_score, log_loss, mean_squared_error, mean_absolute_error
 import warnings
 from FeatureEngine import *
 from pdb import set_trace as st
 import os
+from scipy.stats import spearmanr
+
 
 def calculate_metrics_single(ticker, prices):
     """
@@ -418,6 +420,9 @@ class Model:
         if self.data_split == False:
             raise Exception("Data must be split before tuning params")
         print("TUNING PARAMS...")
+        #coerce 64-bit to 32-bit to speed up
+        float_cols = self.data.select_dtypes(include=['float64']).columns
+        self.data[float_cols] = self.data[float_cols].astype('float32')
         #objective function for tuning params
         if self.target_type == "classification":
             direction = "maximize"
@@ -459,8 +464,9 @@ class Model:
             direction = "minimize"
             def objective(trial):
                 param = {
-                    "objective": "regression",
-                    "metric": "rmse",
+                    "objective": "regression",  # <-- CHANGED: Train trees using Huber
+                    "metric": "rmse",     # <-- CHANGED: Evaluate using Huber
+                    
                     "verbosity": -1,
                     "boosting_type": "gbdt",
                     "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1),
@@ -478,14 +484,38 @@ class Model:
                 dtrain = lgb.Dataset(self.X_train, label=self.y_train)
                 dval = lgb.Dataset(self.X_val, label=self.y_val, reference=dtrain)
 
+                #for huber
+                '''
+                gbm = lgb.train(
+                    param, dtrain, valid_sets=[dval],
+                    # <-- CHANGED: Pruning callback tracks "huber"
+                    callbacks=[lgb.early_stopping(stopping_rounds=20), optuna.integration.LightGBMPruningCallback(trial, "huber")]
+                )
+                return_val = mean_absolute_error(self.y_val, gbm.predict(self.X_val))
+                '''
+
+                #for mae
+                '''
+                gbm = lgb.train(
+                    param, dtrain, valid_sets=[dval],
+                    # <-- CHANGED: Pruning callback now tracks "l1" (MAE)
+                    callbacks=[lgb.early_stopping(stopping_rounds=20), optuna.integration.LightGBMPruningCallback(trial, "l1")]
+                )
+                return_val = mean_absolute_error(self.y_val, gbm.predict(self.X_val))
+                '''
+
+                #for rmse
+                
                 gbm = lgb.train(
                     param, dtrain, valid_sets=[dval],
                     callbacks=[lgb.early_stopping(stopping_rounds=20), optuna.integration.LightGBMPruningCallback(trial, "rmse")]
                 )
-                return np.sqrt(mean_squared_error(self.y_val, gbm.predict(self.X_val)))
+                return_val =  np.sqrt(mean_squared_error(self.y_val, gbm.predict(self.X_val)))
+                
+                return return_val
 
         study = optuna.create_study(direction=direction) 
-        study.optimize(objective, n_trials=500)
+        study.optimize(objective, n_trials=50)
         self.best_params = study.best_params
         self.params_tuned = True
 
@@ -535,8 +565,17 @@ class Model:
             print("MODEL ERROR\n========")
             rmse = np.sqrt(mean_squared_error(self.y_test_bin, predictions))
             dir_acc = ((self.y_test_bin > 0) == (predictions > 0)).mean()
+            def get_daily_ic(group):
+                # Need at least 2 stocks to calculate a rank correlation
+                if len(group) > 1:
+                    # spearmanr returns (correlation, p-value); we just want correlation [0]
+                    return spearmanr(group[self.targets[0]], group["pred_return"])[0] 
+                return np.nan
+            daily_ic_series = self.test_df.groupby('date').apply(get_daily_ic)
+            mean_rank_ic = daily_ic_series.mean()
             print(f"rmse: {rmse}")
             print(f"directional accuracy: {dir_acc}")
+            print(f"Mean Daily Rank IC: {mean_rank_ic:.4f}")
         lgb.plot_importance(self.model, importance_type = 'gain', figsize = (10, 6), title = "Feature Importance")
         plt.tight_layout()
         plt.show()
