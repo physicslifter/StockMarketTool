@@ -357,6 +357,19 @@ def calc_intraday_log_ret(open_p, close_p, timeperiod=1):
         
     return intraday_ret
 
+def calc_forward_return(close, timeperiod=1):
+    """
+    Calculates the Forward Return.
+    """
+    s_close = pd.Series(close)
+    log_ret = np.log(s_close / s_close.shift(1))
+    
+    # Calculate rolling forward sum of returns
+    indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=timeperiod)
+    fwd_ret = log_ret.rolling(window=indexer).sum()
+    
+    return fwd_ret.values
+
 # ==========================================
 # 1. THE REGISTRY
 # ==========================================
@@ -494,6 +507,13 @@ FEATURE_REGISTRY = {
         'type': 'custom_stat',
         'fn': calc_intraday_log_ret,
         'inputs':['open', 'close'],  # Tells the engine to fetch the open and close arrays
+        'outputs': ['real']
+    },
+
+    'FWD_LOG_RET': {
+        'type': 'custom_stat',
+        'fn': calc_forward_return,
+        'inputs': ['close'],
         'outputs': ['real']
     },
 
