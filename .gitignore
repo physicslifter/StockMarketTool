@@ -223,3 +223,4 @@ Data/all_training_data.feather
 model_explorer.py
 /Explorers
 Data/Universes/README.txt
+log.md
