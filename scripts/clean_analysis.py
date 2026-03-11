@@ -464,9 +464,16 @@ class Model:
             direction = "minimize"
             def objective(trial):
                 param = {
+                    #RMSE
+                    '''
                     "objective": "regression",  # <-- CHANGED: Train trees using Huber
                     "metric": "rmse",     # <-- CHANGED: Evaluate using Huber
-                    
+                    '''
+                    #Huber
+                    "objective": "huber",
+                    "metric": "huber",
+                    "alpha": trial.suggest_float("alpha", 0.001, 1.0, log=True), 
+
                     "verbosity": -1,
                     "boosting_type": "gbdt",
                     "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.1),
@@ -485,14 +492,14 @@ class Model:
                 dval = lgb.Dataset(self.X_val, label=self.y_val, reference=dtrain)
 
                 #for huber
-                '''
+                
                 gbm = lgb.train(
                     param, dtrain, valid_sets=[dval],
                     # <-- CHANGED: Pruning callback tracks "huber"
                     callbacks=[lgb.early_stopping(stopping_rounds=20), optuna.integration.LightGBMPruningCallback(trial, "huber")]
                 )
                 return_val = mean_absolute_error(self.y_val, gbm.predict(self.X_val))
-                '''
+                
 
                 #for mae
                 '''
@@ -505,7 +512,7 @@ class Model:
                 '''
 
                 #for rmse
-                
+                '''
                 gbm = lgb.train(
                     param, dtrain, valid_sets=[dval],
                     callbacks=[lgb.early_stopping(stopping_rounds=20), optuna.integration.LightGBMPruningCallback(trial, "rmse")]
@@ -513,6 +520,7 @@ class Model:
                 return_val =  np.sqrt(mean_squared_error(self.y_val, gbm.predict(self.X_val)))
                 
                 return return_val
+                '''
 
         study = optuna.create_study(direction=direction) 
         study.optimize(objective, n_trials=50)
@@ -562,7 +570,7 @@ class Model:
             
         elif self.target_type == "regression":
             self.test_df["pred_return"] = predictions
-            print("MODEL ERROR\n========")
+            print("MODEL ASSESSMENT\n========")
             rmse = np.sqrt(mean_squared_error(self.y_test_bin, predictions))
             dir_acc = ((self.y_test_bin > 0) == (predictions > 0)).mean()
             def get_daily_ic(group):
@@ -573,9 +581,24 @@ class Model:
                 return np.nan
             daily_ic_series = self.test_df.groupby('date').apply(get_daily_ic)
             mean_rank_ic = daily_ic_series.mean()
+            std_rank_ic = daily_ic_series.std()
+        
+            # 2. Prevent division by zero and calculate IC-IR
+            if std_rank_ic != 0 and not np.isnan(std_rank_ic):
+                ic_ir = mean_rank_ic / std_rank_ic           # Calculate Daily IC-IR
+                annualized_ic_ir = ic_ir * np.sqrt(252)      # Annualize it (assuming daily data)
+                n_days = len(daily_ic_series.dropna()) 
+                ic_t_stat = mean_rank_ic / (std_rank_ic / np.sqrt(n_days))
+            else:
+                ic_ir = np.nan
+                annualized_ic_ir = np.nan
             print(f"rmse: {rmse}")
             print(f"directional accuracy: {dir_acc}")
             print(f"Mean Daily Rank IC: {mean_rank_ic:.4f}")
+            print(f"IC Std Dev: {std_rank_ic:.4f}")                 # NEW
+            print(f"Daily IC-IR: {ic_ir:.4f}")                      # NEW
+            print(f"Annualized IC-IR: {annualized_ic_ir:.4f}")
+            print(f"IC T-Statistic: {ic_t_stat:.4f}")
         lgb.plot_importance(self.model, importance_type = 'gain', figsize = (10, 6), title = "Feature Importance")
         plt.tight_layout()
         plt.show()
