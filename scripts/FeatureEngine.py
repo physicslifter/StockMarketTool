@@ -527,7 +527,7 @@ class FeatureRequest:
                  market_ref=None, alias=None, deriv_order=0, 
                  transform=None, transform_params=None):
         """
-        transform: 'rank', 'demean', 'binary', 'regime'
+        transform: 'rank', 'demean', 'binary', 'regime', 'cs_zscore'
         transform_params: dict, e.g. {'threshold': 0.02} for targets
         """
         if name not in FEATURE_REGISTRY:
@@ -840,6 +840,12 @@ class FeatureEngine:
                 elif req.transform == 'demean':
                     means = df.groupby('date')[base_col].transform('mean')
                     df[final_col] = df[base_col] - means
+
+                elif req.transform == 'cs_zscore':
+                    means = df.groupby('date')[base_col].transform('mean')
+                    stds = df.groupby('date')[base_col].transform('std')
+                    # Replace 0 with NaN to prevent division by zero in flat markets
+                    df[final_col] = (df[base_col] - means) / stds.replace(0, np.nan)
                     
                 elif req.transform == 'binary':
                     thresh = req.transform_params.get('threshold', 0)
