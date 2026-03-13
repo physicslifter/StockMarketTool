@@ -31,13 +31,14 @@ test_feature_engine2 = 0
 test_liquidity = 0
 test_MA_crossover = 0
 test_hurst_autocorr = 0
-test_BETA = 1 #test for pandas BETA feature
+test_BETA = 0 #test for pandas BETA feature
 test_vwap_zscore = 0
 test_vol_zscore = 0
 test_adx_regime = 0
 test_range_features = 0
 test_gap_sigma = 0
 test_sharpe_target = 0
+test_cross_sectional_z = 1
 
 #testing the model
 test_model = 0
@@ -1240,4 +1241,68 @@ if test_sharpe_target == True:
     ax2.fill_between(sub_df.date, 0, sub_df[col], where=(sub_df[col] < -1), color='red', alpha=0.3)
     
     plt.title("Forward Sharpe Ratio (The 'Quality' Target)")
+    plt.show()
+
+if test_cross_sectional_z == True:
+    # 1. Load Data
+    try:
+        df = pd.read_feather("../Data/all_ohlcv.feather")
+        df["date"] = pd.to_datetime(df["date"])
+    except Exception as e:
+        print(f"Data error: {e}")
+        exit()
+    
+    stocks_to_get = ["AAPL", "TSLA", "PFE", "AMZN", "NFLX", "F", "STLA"]
+    df = df[df.act_symbol.isin(stocks_to_get)]
+
+    # 2. Setup requests: 
+    # We request the raw forward return AND the cs_zscored forward return
+    reqs =[
+        FeatureRequest(name='FWD_LOG_RET', shift=1), # Raw baseline
+        FeatureRequest(name='FWD_LOG_RET', shift=1, transform='cs_zscore') # New Transform
+    ]
+    
+    # 3. Compute
+    engine = FeatureEngine(reqs)
+    df_out = engine.compute(df)
+    
+    # 4. Filter for a specific date to plot the cross-section
+    # We pick index 5, ensuring we have forward returns available
+    sample_date = df_out['date'].unique()[5]
+    df_day = df_out[df_out['date'] == sample_date].copy()
+    
+    
+    target_cols = [key for key in df_out.keys() if "T" in key.split("_")]
+    raw_col = target_cols[0]
+    zscore_col = target_cols[1]
+    
+    # Show the math works
+    mean_raw = df_day[raw_col].mean()
+    std_raw = df_day[raw_col].std()
+    print(f"--- Cross Section Stats for {pd.to_datetime(sample_date).date()} ---")
+    print(f"Raw Mean: {mean_raw:.4f} | Raw Std: {std_raw:.4f}")
+    print(f"Z-Score Mean: {df_day[zscore_col].mean():.4f} | Z-Score Std: {df_day[zscore_col].std():.4f}\n")
+    
+    # 5. Plotting
+    plt.style.use("dark_background")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Plot 1: Raw Returns
+    bars1 = ax1.bar(df_day['act_symbol'], df_day[raw_col], color='dodgerblue')
+    ax1.axhline(mean_raw, color='red', linestyle='--', label=f'Mean ({mean_raw:.4f})')
+    ax1.set_title("Raw Forward Returns (1d)")
+    ax1.set_ylabel("Log Return")
+    ax1.legend()
+    
+    # Plot 2: CS Z-Score Returns
+    # Map colors: green if > 0, red if < 0
+    colors =['lime' if val > 0 else 'tomato' for val in df_day[zscore_col]]
+    bars2 = ax2.bar(df_day['act_symbol'], df_day[zscore_col], color=colors)
+    ax2.axhline(0, color='white', linestyle='--', label='Mean (0.0)')
+    ax2.set_title("Cross-Sectional Z-Score Targets")
+    ax2.set_ylabel("Z-Score (Standard Deviations)")
+    ax2.legend()
+    
+    plt.suptitle(f"Cross-Sectional Standardization Test for {pd.to_datetime(sample_date).date()}", fontsize=14)
+    plt.tight_layout()
     plt.show()
