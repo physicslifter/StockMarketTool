@@ -27,6 +27,7 @@ from FeatureEngine import *
 from pdb import set_trace as st
 import os
 from scipy.stats import spearmanr
+import re
 
 
 def calculate_metrics_single(ticker, prices):
@@ -518,9 +519,10 @@ class Model:
                     callbacks=[lgb.early_stopping(stopping_rounds=20), optuna.integration.LightGBMPruningCallback(trial, "rmse")]
                 )
                 return_val =  np.sqrt(mean_squared_error(self.y_val, gbm.predict(self.X_val)))
-                
-                return return_val
                 '''
+
+                return return_val
+                
 
         study = optuna.create_study(direction=direction) 
         study.optimize(objective, n_trials=50)
@@ -573,7 +575,9 @@ class Model:
             print("MODEL ASSESSMENT\n========")
             rmse = np.sqrt(mean_squared_error(self.y_test_bin, predictions))
             dir_acc = ((self.y_test_bin > 0) == (predictions > 0)).mean()
-            def get_daily_ic(group):
+            
+            #old method for getting metrics
+            '''def get_daily_ic(group):
                 # Need at least 2 stocks to calculate a rank correlation
                 if len(group) > 1:
                     # spearmanr returns (correlation, p-value); we just want correlation [0]
@@ -598,10 +602,155 @@ class Model:
             print(f"IC Std Dev: {std_rank_ic:.4f}")                 # NEW
             print(f"Daily IC-IR: {ic_ir:.4f}")                      # NEW
             print(f"Annualized IC-IR: {annualized_ic_ir:.4f}")
-            print(f"IC T-Statistic: {ic_t_stat:.4f}")
+            print(f"IC T-Statistic: {ic_t_stat:.4f}")'''
+
+            mean_ic, std_ic, ic_ir, ann_ic_ir, t_stat = self._calculate_robust_ic_metrics()
+            
+            print(f"rmse: {rmse:.4f}")
+            print(f"directional accuracy: {dir_acc:.4f}")
+            print(f"Robust Mean Rank IC: {mean_ic:.4f}")
+            print(f"Robust IC Std Dev: {std_ic:.4f}")                 
+            print(f"Robust IC-IR: {ic_ir:.4f}")                      
+            print(f"Robust Annualized IC-IR: {ann_ic_ir:.4f}")
+            print(f"Robust IC T-Statistic: {t_stat:.4f}")
+
         lgb.plot_importance(self.model, importance_type = 'gain', figsize = (10, 6), title = "Feature Importance")
         plt.tight_layout()
         plt.show()
+
+    def _calculate_robust_ic_metrics(self):
+        """
+        Calculates Information Coefficient metrics adjusting for overlapping returns.
+        Uses Effective Sample Size to prevent overlapping forward returns 
+        from artificially inflating the t-statistic.
+        """
+        # 1. Extract N (overlap period) specifically from FeatureEngine naming convention
+        # This explicitly looks for the parameter right after FWD_LOG_RET or TARGET_SHARPE
+        match = re.search(r'(?:FWD_LOG_RET|TARGET_SHARPE)_(\d+)', self.target_key)
+        
+        if match:
+            N = int(match.group(1)) # Extracts the '5' from 'FWD_LOG_RET_5_...'
+        else:
+            # Fallback in case you manually assign an alias like "Target_5d_T"
+            match_alias = re.search(r'(\d+)d', self.target_key)
+            N = int(match_alias.group(1)) if match_alias else 1
+
+        # 2. Helper to calculate daily spearman rank correlation
+        def get_daily_ic(group):
+            if len(group) > 1:
+                return spearmanr(group[self.targets[0]], group["pred_return"])[0] 
+            return np.nan
+
+        # 3. Calculate daily rank ICs for ALL days
+        daily_ics = self.test_df.groupby('date').apply(get_daily_ic).dropna()
+        
+        if len(daily_ics) < 2:
+            return np.nan, np.nan, np.nan, np.nan, np.nan
+
+        # 4. Calculate core aggregate metrics
+        mean_ic = daily_ics.mean()
+        std_ic = daily_ics.std()
+        n_days = len(daily_ics)
+        
+        # 5. Apply Overlap Corrections
+        if std_ic != 0 and not np.isnan(std_ic):
+            ic_ir = mean_ic / std_ic
+            
+            # Annualize based on non-overlapping frequency
+            ann_ic_ir = ic_ir * np.sqrt(252 / N) 
+            
+            # Robust T-Statistic uses EFFECTIVE Sample Size (n_days / N)
+            # This perfectly adjusts the standard error for an MA(N-1) autocorrelation process
+            effective_n_days = n_days / N
+            t_stat = mean_ic / (std_ic / np.sqrt(effective_n_days))
+            
+        else:
+            ic_ir, ann_ic_ir, t_stat = np.nan, np.nan, np.nan
+            
+        return mean_ic, std_ic, ic_ir, ann_ic_ir, t_stat
+    
+    def evaluate_quantile_spread(self, quantiles=10, plot=True):
+        """
+        Evaluates the model by dividing daily predictions into cross-sectional quantiles.
+        Calculates the actual target spread between the top (long) and bottom (short) quantiles.
+        """
+        import re
+        
+        if "pred_return" not in self.test_df.columns:
+            raise Exception("Model has not generated predictions yet. Run test_model() first.")
+            
+        df = self.test_df.copy()
+        target_col = self.targets[0]
+        
+        print(f"\nQUANTILE SPREAD ANALYSIS (Top {100/quantiles:.1f}% vs Bottom {100/quantiles:.1f}%)")
+        print("========================")
+        
+        # 1. Assign cross-sectional quantiles daily (1 = Worst, 10 = Best)
+        # We use rank(method='first') to ensure qcut doesn't fail on duplicate predictions
+        df['quantile'] = df.groupby('date')['pred_return'].transform(
+            lambda x: pd.qcut(x.rank(method='first'), q=quantiles, labels=False) + 1
+        )
+        
+        # 2. Calculate the mean actual target value for each quantile per day
+        # Shape: (Dates as index, Quantiles 1-10 as columns)
+        daily_quantile_returns = df.groupby(['date', 'quantile'])[target_col].mean().unstack()
+        
+        # Drop days where we couldn't form a full set of quantiles
+        daily_quantile_returns = daily_quantile_returns.dropna()
+        
+        if daily_quantile_returns.empty:
+            print("Not enough data to form quantiles.")
+            return
+            
+        # 3. Calculate Long-Short Spread (Top Quantile - Bottom Quantile)
+        daily_spread = daily_quantile_returns[quantiles] - daily_quantile_returns[1]
+        
+        # 4. Summary Metrics
+        mean_spread = daily_spread.mean()
+        win_rate = (daily_spread > 0).mean()
+        
+        # Calculate Effective Sharpe (adjusting for N-day overlap)
+        match = re.search(r'(?:FWD_LOG_RET|TARGET_SHARPE)_(\d+)', self.target_key)
+        N = int(match.group(1)) if match else 1
+        
+        std_spread = daily_spread.std()
+        if std_spread != 0 and not np.isnan(std_spread):
+            # Annualize and adjust standard error for overlapping paths
+            sharpe = (mean_spread / std_spread) * np.sqrt(252 / N)
+        else:
+            sharpe = np.nan
+            
+        print(f"Mean Daily Target Spread : {mean_spread:.4f}")
+        print(f"Spread Win Rate          : {win_rate:.2%}")
+        print(f"Estimated Annual Sharpe  : {sharpe:.4f}")
+        
+        # 5. Plotting
+        if plot:
+            import matplotlib.pyplot as plt
+            fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+            
+            # Plot 1: Mean Target by Quantile (Check for monotonicity)
+            overall_q_mean = daily_quantile_returns.mean()
+            axes[0].bar(overall_q_mean.index, overall_q_mean.values, color='skyblue', edgecolor='black')
+            axes[0].set_title("Average Target Value by Prediction Quantile")
+            axes[0].set_xlabel("Quantile (1 = Worst Prediction, 10 = Best Prediction)")
+            axes[0].set_ylabel(f"Mean Actual {target_col}")
+            axes[0].set_xticks(range(1, quantiles + 1))
+            axes[0].axhline(0, color='red', linestyle='--', linewidth=1)
+            
+            # Plot 2: Cumulative Long-Short Spread (Alpha Generation)
+            cumulative_spread = daily_spread.cumsum()
+            axes[1].plot(cumulative_spread.index, cumulative_spread.values, color='purple', linewidth=2)
+            axes[1].set_title("Cumulative Long-Short Spread (Alpha)")
+            axes[1].set_xlabel("Date")
+            axes[1].set_ylabel("Cumulative Target Spread")
+            axes[1].axhline(0, color='black', linewidth=1)
+            axes[1].grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.show()
+            
+        return daily_quantile_returns, daily_spread
 
 class PortfolioStrat:
     def __init__(self):
