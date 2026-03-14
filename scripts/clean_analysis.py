@@ -486,7 +486,8 @@ class Model:
                     "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
                     "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
                     "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
-                    "seed": 42
+                    "seed": 42,
+                    "colsample_bytree": 0.1
                 }
 
                 dtrain = lgb.Dataset(self.X_train, label=self.y_train)
@@ -751,6 +752,70 @@ class Model:
             plt.show()
             
         return daily_quantile_returns, daily_spread
+    
+    import pandas as pd
+
+    def apply_kuhn_johnson_reduction(self, threshold=0.75):
+        """
+        Automates the Kuhn & Johnson feature reduction algorithm.
+
+        Args:
+            df: Pandas DataFrame containing your data.
+            feature_cols: List of column names to consider for reduction (your 'X' variables).
+            threshold: The absolute correlation threshold to trigger removal.
+
+        Returns:
+            List of features to keep.
+        """
+
+        # Step 1: Calculate the absolute correlation matrix of the predictors
+        # (We use absolute because -0.90 is just as correlated as +0.90)
+        feature_cols = [key for key in self.data.keys() if "F" in key.split("_")]
+        corr_matrix = self.data[feature_cols].corr().abs()
+
+        dropped_features =[]
+
+        while True:
+            # Mask the diagonal and lower triangle so we don't compare features to themselves
+            upper_tri = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+
+            # Find the single highest absolute correlation value in the matrix
+            max_corr = upper_tri.max().max()
+
+            # Step 5: Repeat until no absolute correlations are above the threshold
+            if pd.isna(max_corr) or max_corr < threshold:
+                break
+
+            # Step 2: Determine the two predictors (A and B) with the largest correlation
+            # .stack() creates a series of all pairs, .idxmax() grabs the names of the top pair
+            feature_A, feature_B = upper_tri.stack().idxmax()
+
+            # Step 3: Determine the average correlation between A/B and the *other* variables
+            # We drop A and B from the column so we are comparing them strictly to the REST of the dataset
+            avg_corr_A = corr_matrix[feature_A].drop([feature_A, feature_B]).mean()
+            avg_corr_B = corr_matrix[feature_B].drop([feature_A, feature_B]).mean()
+
+            # Step 4: If A has a larger average correlation, remove it; otherwise, remove B
+            if avg_corr_A > avg_corr_B:
+                to_drop = feature_A
+            else:
+                to_drop = feature_B
+
+            dropped_features.append(to_drop)
+
+            # Update the correlation matrix by removing the dropped feature for the next loop iteration
+            corr_matrix = corr_matrix.drop(index=to_drop, columns=to_drop)
+
+            # Optional: Print progress so you can see what is happening under the hood
+            # print(f"Max Corr: {max_corr:.3f} | Pair: ({feature_A}, {feature_B}) | Dropped: {to_drop}")
+
+        # Final reporting
+        features_to_keep =[col for col in feature_cols if col not in dropped_features]
+        print(f"Dropped {len(dropped_features)} features due to collinearity > {threshold}.")
+        print(f"Remaining features: {len(features_to_keep)}")
+
+        features_to_drop = [feature for feature in feature_cols if feature not in features_to_keep]
+        self.data.drop(features_to_drop, axis = 1, inplace = True)
 
 class PortfolioStrat:
     def __init__(self):
