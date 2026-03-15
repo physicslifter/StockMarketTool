@@ -817,6 +817,182 @@ class Model:
         features_to_drop = [feature for feature in feature_cols if feature not in features_to_keep]
         self.data.drop(features_to_drop, axis = 1, inplace = True)
 
+    def apply_block_pca_reduction(self, correlation_threshold=0.75, max_pcs=1):
+        """
+        Groups highly correlated features into clusters and replaces them with 
+        their Principal Components (Block PCA), retaining orthogonal signal 
+        while reducing noise and multicollinearity.
+        
+        Args:
+            correlation_threshold (float): The absolute correlation above which 
+                                           features will be grouped together.
+            max_pcs (int): How many principal components to keep per cluster.
+                           (1 is usually best to capture the core 'factor')
+        """
+        import pandas as pd
+        import numpy as np
+        from scipy.cluster.hierarchy import linkage, fcluster
+        from scipy.spatial.distance import squareform
+        from sklearn.decomposition import PCA
+        
+        # 1. Identify feature columns using your class's existing convention
+        feature_cols =[key for key in self.data.keys() if "F" in key.split("_")]
+        if len(feature_cols) < 2:
+            print("Not enough features to perform reduction.")
+            return
+
+        # 2. Create condensed distance matrix based on absolute correlation
+        corr_matrix = self.data[feature_cols].corr().abs()
+        dist_array = 1.0 - corr_matrix.values
+        
+        # Mathematical checks to ensure strict matrix symmetry and 0 diagonal 
+        # (required by scipy's squareform)
+        dist_array = (dist_array + dist_array.T) / 2.0  
+        np.fill_diagonal(dist_array, 0.0)               
+        dist_array = np.clip(dist_array, 0.0, 1.0)      
+        
+        condensed_dist = squareform(dist_array)
+
+        # 3. Hierarchical clustering
+        # 'complete' linkage ensures all features in a cluster are correlated 
+        # to each other by AT LEAST the threshold
+        Z = linkage(condensed_dist, method='complete')
+        distance_threshold = 1.0 - correlation_threshold
+        labels = fcluster(Z, t=distance_threshold, criterion='distance')
+
+        # Group features by their assigned cluster label
+        clusters = {}
+        for feature, label in zip(feature_cols, labels):
+            clusters.setdefault(label,[]).append(feature)
+
+        features_to_drop =[]
+        new_features_df = pd.DataFrame(index=self.data.index)
+
+        # 4. Perform PCA on correlated clusters
+        for label, group in clusters.items():
+            if len(group) == 1:
+                continue  # Leave isolated/uncorrelated features alone
+                
+            features_to_drop.extend(group)
+            
+            # Standardize before PCA (critical for PCA on variables with different scales)
+            subset_data = self.data[group].copy()
+            subset_scaled = (subset_data - subset_data.mean()) / (subset_data.std() + 1e-8)
+            subset_scaled = subset_scaled.fillna(0) # Safety against NaNs
+            
+            # Fit PCA
+            pca = PCA()
+            pca.fit(subset_scaled)
+            
+            # Calculate how many PCs to keep (do not exceed the original variable count)
+            n_comps = min(max_pcs, len(group) - 1)
+            n_comps = max(1, n_comps) 
+            
+            pca_transformed = pca.transform(subset_scaled)[:, :n_comps]
+            
+            # 5. Name the new features combining the grouped feature names
+            # We strip out the "F_" part of the original names to prevent "F_F_F_" stacking
+            clean_names =[f.replace('F_', '') for f in group]
+            combined_name = "_".join(clean_names)
+            
+            for i in range(n_comps):
+                # Ensure the name starts with F_ so your class regex logic successfully 
+                # identifies it as a feature during split_data()
+                new_col_name = f"F_PCA_PC{i+1}_{combined_name}"
+                
+                # Pandas handles long names, but we'll cap them at 100 characters 
+                # to prevent unreadable dataframe outputs and plot axes
+                if len(new_col_name) > 100:
+                    new_col_name = new_col_name[:90] + "_TRUNC"
+                    
+                new_features_df[new_col_name] = pca_transformed[:, i]
+
+        # 6. Apply back to self.data
+        if features_to_drop:
+            self.data.drop(columns=features_to_drop, inplace=True)
+            self.data = pd.concat([self.data, new_features_df], axis=1)
+
+        print(f"--- Block PCA Reduction Summary ---")
+        print(f"Original features evaluated: {len(feature_cols)}")
+        print(f"Features dropped due to collinearity > {correlation_threshold}: {len(features_to_drop)}")
+        print(f"New PCA features generated: {new_features_df.shape[1]}")
+        print(f"Final feature count: {len(feature_cols) - len(features_to_drop) + new_features_df.shape[1]}")
+
+    def apply_shadow_feature_selection(self, num_iterations=5, importance_type='gain'):
+        """
+        Uses a Boruta-style 'Shadow Feature' approach to drop noise.
+        Creates randomly shuffled copies of every feature and drops any real feature
+        that cannot outperform the best randomized shadow feature.
+        """
+        if not self.data_split:
+            raise Exception("You must call split_data() before running shadow feature selection.")
+            
+        print("\n--- Running Target-Aware Shadow Feature Selection ---")
+        
+        real_features = self.features.copy()
+        features_to_drop = set()
+        
+        # We run this a few times to ensure stability (random seeds matter)
+        for iteration in range(num_iterations):
+            print(f"Iteration {iteration+1}/{num_iterations}...")
+            
+            # 1. Create a temporary dataframe with real features
+            X_train_temp = self.X_train.copy()
+            
+            # 2. Add 'shadow' (randomly shuffled) versions of every feature
+            shadow_names =[]
+            for feat in real_features:
+                shadow_name = f"SHADOW_{feat}"
+                shadow_names.append(shadow_name)
+                # Randomly permute the column
+                X_train_temp[shadow_name] = np.random.permutation(X_train_temp[feat].values)
+            
+            # 3. Train a quick, shallow LightGBM model
+            # We use shallow trees to prevent massive overfitting to the noise
+            params = {
+                'objective': 'regression' if self.target_type == 'regression' else 'binary',
+                'boosting_type': 'gbdt',
+                'max_depth': 4,
+                'num_leaves': 15,
+                'learning_rate': 0.05,
+                'verbosity': -1,
+                'seed': 42 + iteration
+            }
+            
+            dtrain = lgb.Dataset(X_train_temp, label=self.y_train)
+            model = lgb.train(params, dtrain, num_boost_round=100)
+            
+            # 4. Extract Feature Importances
+            importance_df = pd.DataFrame({
+                'feature': X_train_temp.columns,
+                'importance': model.feature_importance(importance_type=importance_type)
+            })
+            
+            # 5. Find the maximum importance achieved by ANY shadow feature
+            shadow_importances = importance_df[importance_df['feature'].str.startswith('SHADOW_')]
+            max_shadow_importance = shadow_importances['importance'].max()
+            
+            # 6. Identify real features that scored LOWER than the best shadow feature
+            real_importances = importance_df[~importance_df['feature'].str.startswith('SHADOW_')]
+            failed_features = real_importances[real_importances['importance'] <= max_shadow_importance]['feature'].tolist()
+            
+            # Add to our set of features to drop
+            features_to_drop.update(failed_features)
+            
+        # 7. Apply the reduction
+        features_to_keep =[f for f in real_features if f not in features_to_drop]
+        
+        # Update class variables
+        self.features = features_to_keep
+        self.X_train = self.X_train[self.features]
+        self.X_val = self.X_val[self.features]
+        self.X_test = self.X_test[self.features]
+        
+        print(f"\n--- Shadow Feature Selection Complete ---")
+        print(f"Original feature count : {len(real_features)}")
+        print(f"Features dropped       : {len(features_to_drop)}")
+        print(f"Remaining clean features: {len(self.features)}")
+
 class PortfolioStrat:
     def __init__(self):
         pass
