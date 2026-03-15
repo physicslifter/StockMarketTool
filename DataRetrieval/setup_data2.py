@@ -108,5 +108,5 @@ print("7. Saving Data...")
 final_df = final_df.reset_index(drop=True)
 
 # Save
-final_df.to_feather("Data/all_data_with_fundamentals.feather")
+final_df.to_feather("../Data/all_data_with_fundamentals.feather")
 print("Done!")
