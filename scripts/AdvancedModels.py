@@ -48,6 +48,14 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
     current_year = global_start_year
     fold = 1
 
+    # 2. Instantiate a fresh model for this specific fold, passing the fold_folder
+    train_start = f"{current_year}-01-01"
+    val_start = f"{current_year + train_years}-01-01"
+    test_start = f"{current_year + train_years + val_years}-01-01"
+    test_end = f"{current_year + train_years + val_years + test_years}-01-01"
+    fold_folder = os.path.join(folder_path, f"fold_{test_start[:4]}_{test_end[:4]}")
+    model = Model(universe_path, model_folder=fold_folder)
+
     while True:
         # Define the chronological window boundaries
         train_start = f"{current_year}-01-01"
@@ -174,7 +182,7 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
     else:
         return pd.DataFrame(), metrics_df
 
-'''
+
 #==================
 #CPCV Model
 #==================
@@ -201,7 +209,8 @@ class CPCVModel(Model):
         Overrides the base split_data. Defines the entire dataset as X and y, 
         and initializes the skfolio CombinatorialPurgedCV object.
         """
-        self.generate_targets_and_features()
+        if self.data_generated == False:
+            self.generate_targets_and_features()
 
         if not self.has_features or not self.has_target:
             raise Exception("Features or target missing. Add them before splitting.")
@@ -295,6 +304,7 @@ class CPCVModel(Model):
             
             # Loop through the sampled CPCV splits
             for train_date_idx, test_date_idx in eval_splits:
+                print(test_date_idx)
                 # Map selected indices back to actual Dates
                 train_dates = self.unique_dates_series.iloc[train_date_idx].index
                 test_dates = self.unique_dates_series.iloc[test_date_idx].index
@@ -541,5 +551,93 @@ class CPCVModel(Model):
             
         print("Ready for live trading deployment.")
 
+    def save_cpcv_ic_metrics(self, filename="cpcv_ic_metrics.csv"):
+        """
+        Calculates the Information Coefficient (IC) metrics for each CPCV split 
+        and saves them to a CSV file in the model folder.
+        
+        Metrics calculated per split:
+        - Mean IC (Information Coefficient)
+        - IC Standard Deviation
+        - Daily IC-IR (Information Ratio)
+        - Annual IC-IR
+        - T-Statistic
+        """
+        if not self.cpcv_results:
+            raise Exception("Run test_model() first to generate Out-Of-Sample predictions.")
+            
+        if self.model_folder is None:
+            raise Exception("A model_folder must be provided during initialization to save the CSV.")
+
+        print(f"\n--- CALCULATING IC METRICS FOR ALL {len(self.cpcv_results)} SPLITS ---")
+        
+        # Extract the holding period (N) to calculate the annualized factor
+        match = re.search(r'_(\d+)', self.target_key)
+        N = int(match.group(1)) if match else 1
+        ann_factor = np.sqrt(252 / N)
+
+        metrics_records =[]
+
+        # Iterate over every Out-Of-Sample dataframe generated during test_model()
+        for split_id, df in self.cpcv_results.items():
+            
+            # 1. Calculate the Daily Cross-Sectional Information Coefficient (IC)
+            # Using Spearman rank correlation between predictions and actual targets
+            daily_ic = df.groupby('date').apply(
+                lambda x: x['pred_return'].corr(x[self.target_key], method='spearman') if len(x) > 1 else np.nan
+            ).dropna()
+
+            # If a split doesn't have enough valid data, skip or append NaNs
+            if daily_ic.empty or len(daily_ic) < 2:
+                metrics_records.append({
+                    "Split_ID": split_id,
+                    "Mean_IC": np.nan,
+                    "Std_IC": np.nan,
+                    "Daily_IC_IR": np.nan,
+                    "Ann_IC_IR": np.nan,
+                    "T_Statistic": np.nan
+                })
+                continue
+
+            # 2. Calculate the specific summary statistics
+            T = len(daily_ic)          # Number of days in the test split
+            mean_ic = daily_ic.mean()
+            std_ic = daily_ic.std()
+            
+            # Handle potential division by zero
+            if std_ic == 0 or np.isnan(std_ic):
+                daily_ic_ir = np.nan
+                ann_ic_ir = np.nan
+                t_stat = np.nan
+            else:
+                daily_ic_ir = mean_ic / std_ic
+                ann_ic_ir = daily_ic_ir * ann_factor
+                t_stat = mean_ic / (std_ic / np.sqrt(T))
+
+            # 3. Store the record for this combination
+            metrics_records.append({
+                "Split_ID": split_id,
+                "Mean_IC": mean_ic,
+                "Std_IC": std_ic,
+                "Daily_IC_IR": daily_ic_ir,
+                "Ann_IC_IR": ann_ic_ir,
+                "T_Statistic": t_stat
+            })
+
+        # 4. Convert to DataFrame and save to CSV
+        metrics_df = pd.DataFrame(metrics_records)
+        
+        # Ensure the directory exists
+        import os
+        os.makedirs(self.model_folder, exist_ok=True)
+        
+        save_path = os.path.join(self.model_folder, filename)
+        metrics_df.to_csv(save_path, index=False)
+        
+        # Print summary of what was saved
+        print(f"Successfully saved IC metrics to: {save_path}")
+        print(f"Average Annualized IC-IR across all splits: {metrics_df['Ann_IC_IR'].mean():.4f}")
+        
+        return metrics_df
+
 #=================
-'''
