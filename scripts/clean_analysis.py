@@ -371,6 +371,7 @@ class Model:
             self.has_folder = True
             os.makedirs(model_folder, exist_ok = True)
         self.model_folder = model_folder
+        self.data_generated = False
 
     def add_target(self, target, target_type:str = "regression", save:bool = True):
         valid_target_types = ["classification", "regression"]
@@ -404,7 +405,8 @@ class Model:
     def split_data(self,
                    cutoffs:list = None
                    ):
-        self.generate_targets_and_features()
+        if self.data_generated == False:
+            self.generate_targets_and_features()
         if self.has_features == False:
             raise Exception("No features added")
         if self.has_target == False:
@@ -475,7 +477,8 @@ class Model:
         Splits data using explicit date boundaries, retaining purge and embargo gaps.
         Dates should be passed as strings (e.g., '2015-01-01') or pd.Timestamp.
         """
-        self.generate_targets_and_features()
+        if self.data_generated == False:
+            self.generate_targets_and_features()
         if not self.has_features or not self.has_target:
             raise Exception("Features or target missing.")
 
@@ -649,6 +652,7 @@ class Model:
         self.data = self.data.dropna(subset = feature_keys + [target_key]) #drop rows with nan for features or targets
         self.feature_keys = feature_keys
         self.target_key = target_key
+        self.data_generated = True
 
     def train_model(self, 
                     perturb_hyperparameters:bool = False,
@@ -1323,3 +1327,4 @@ class Model:
                 dsr = norm.cdf(dsr_stat)
                 
         return sr_hat, psr, dsr, sr0
+    
