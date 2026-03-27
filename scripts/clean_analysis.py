@@ -595,6 +595,12 @@ class Model:
                     "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
                     "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
                     "seed": 42,
+
+                    #for categorical features to prevent overfitting
+                    "cat_smooth": trial.suggest_float("cat_smooth", 10.0, 100.0), # Reduces impact of noisy sectors
+                    "cat_l2": trial.suggest_float("cat_l2", 1.0, 50.0),           # L2 penalty specifically for categorical splits
+                    "min_data_per_group": trial.suggest_int("min_data_per_group", 50, 200), # Prevents isolating tiny sectors
+                    
                 }
 
                 dtrain = lgb.Dataset(self.X_train, label=self.y_train)
