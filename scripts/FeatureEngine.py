@@ -889,7 +889,10 @@ class FeatureEngine:
         if cat_reqs:
             print("Phase 1.3: Loading Static Categorical Features...")
             # 1. Load the sectors data
-            sectors_df = pd.read_csv("../Data/sectors.csv", usecols=['act_symbol', 'sector'])
+            sectors_df = pd.read_csv("../Data/sectors_info.csv", usecols=['act_symbol', 'macro_sector'])
+            
+            # --- NEW LINE ADDED HERE ---
+            sectors_df = sectors_df.drop_duplicates(subset=['act_symbol'])
             
             # 2. Merge onto the main dataframe
             df = df.merge(sectors_df, on='act_symbol', how='left')
@@ -897,11 +900,12 @@ class FeatureEngine:
             # 3. Cast to pandas 'category' type and map to requested column name
             for req in cat_reqs:
                 if req.name == 'SECTOR':
-                    df[req.base_col_name] = df['sector'].astype('category')
+                    # --- LINE MODIFIED HERE (added .fillna) ---
+                    df[req.base_col_name] = df['macro_sector'].fillna('UNKNOWN').astype('category')
             
             # Drop the raw 'sector' column if a different base_col_name was generated
-            if 'sector' not in[r.base_col_name for r in cat_reqs]:
-                df.drop(columns=['sector'], inplace=True)
+            if 'macro_sector' not in[r.base_col_name for r in cat_reqs]:
+                df.drop(columns=['macro_sector'], inplace=True)
                 
             # Resort for Phase 2 safety
             df = df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
