@@ -554,6 +554,11 @@ FEATURE_REGISTRY = {
         'outputs': ['real'] # 'real' triggers a blank suffix, exactly mapping to 'VIX'
     },
 
+    'SECTOR': {
+        'type': 'static_categorical',
+        'outputs': ['real'] 
+    },
+
 }
 
 # ==========================================
@@ -705,7 +710,7 @@ class FeatureEngine:
         macro_reqs =[r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] == 'macro']
 
         calendar_reqs =[r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] == 'calendar']
-        other_reqs    = [r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] != 'calendar']
+        other_reqs =[r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] not in['calendar', 'macro', 'static_categorical']]
         
         for req in calendar_reqs:
             attr = FEATURE_REGISTRY[req.name]['attr']
@@ -876,6 +881,30 @@ class FeatureEngine:
 
                 # Resort for Phase 2 safety
                 df = df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
+
+        # -------------------------------------------------------
+        # PHASE 1.3: STATIC CATEGORICAL DATA
+        # -------------------------------------------------------
+        cat_reqs =[r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] == 'static_categorical']
+        if cat_reqs:
+            print("Phase 1.3: Loading Static Categorical Features...")
+            # 1. Load the sectors data
+            sectors_df = pd.read_csv("../Data/sectors.csv", usecols=['act_symbol', 'sector'])
+            
+            # 2. Merge onto the main dataframe
+            df = df.merge(sectors_df, on='act_symbol', how='left')
+            
+            # 3. Cast to pandas 'category' type and map to requested column name
+            for req in cat_reqs:
+                if req.name == 'SECTOR':
+                    df[req.base_col_name] = df['sector'].astype('category')
+            
+            # Drop the raw 'sector' column if a different base_col_name was generated
+            if 'sector' not in[r.base_col_name for r in cat_reqs]:
+                df.drop(columns=['sector'], inplace=True)
+                
+            # Resort for Phase 2 safety
+            df = df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
 
         # -------------------------------------------------------
         # PHASE 2: GROUPBY LOOP (Time Series Features)
