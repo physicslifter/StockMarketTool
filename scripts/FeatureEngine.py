@@ -896,7 +896,7 @@ class FeatureEngine:
         if cat_reqs:
             print("Phase 1.3: Loading Static Categorical Features...")
             # 1. Load the sectors data
-            sectors_df = pd.read_csv("../Data/sectors_info.csv", usecols=['act_symbol', 'macro_sector'])
+            sectors_df = pd.read_csv("../Data/sectors_info.csv", usecols=['act_symbol', 'NAICS_macro'])
             
             # --- NEW LINE ADDED HERE ---
             sectors_df = sectors_df.drop_duplicates(subset=['act_symbol'])
@@ -908,11 +908,11 @@ class FeatureEngine:
             for req in cat_reqs:
                 if req.name == 'SECTOR':
                     # --- LINE MODIFIED HERE (added .fillna) ---
-                    df[req.base_col_name] = df['macro_sector'].fillna('UNKNOWN').astype('category')
+                    df[req.base_col_name] = df['NAICS_macro'].fillna('UNKNOWN').astype('category')
             
             # Drop the raw 'sector' column if a different base_col_name was generated
-            if 'macro_sector' not in[r.base_col_name for r in cat_reqs]:
-                df.drop(columns=['macro_sector'], inplace=True)
+            if 'NAICS_macro' not in[r.base_col_name for r in cat_reqs]:
+                df.drop(columns=['NAICS_macro'], inplace=True)
                 
             # Resort for Phase 2 safety
             df = df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
@@ -1038,9 +1038,9 @@ class FeatureEngine:
             for req in self.requests
         )
         if self.needs_sector_data:
-            sectors_df = pd.read_csv("../Data/sectors_info.csv", usecols=['act_symbol', 'macro_sector']).drop_duplicates(subset=['act_symbol'])
+            sectors_df = pd.read_csv("../Data/sectors_info.csv", usecols=['act_symbol', 'NAICS_macro']).drop_duplicates(subset=['act_symbol'])
             df = df.merge(sectors_df, on='act_symbol', how='left')
-            df['macro_sector'] = df['macro_sector'].fillna('UNKNOWN')
+            df['NAICS_macro'] = df['NAICS_macro'].fillna('UNKNOWN')
 
         # NEW: Keep track of base columns that were transformed
         base_cols_used_for_transforms = set()
@@ -1070,7 +1070,7 @@ class FeatureEngine:
                 # --- APPLY TRANSFORMS ---
                 # Determine grouping (Market vs Sector) for relevant features
                 if req.transform in['rank', 'demean', 'cs_zscore']:
-                    cs_group = ['date', 'macro_sector'] if getattr(req, 'neutralization', 'market') == 'sector' else ['date']
+                    cs_group = ['date', 'NAICS_macro'] if getattr(req, 'neutralization', 'market') == 'sector' else ['date']
                 
                 if req.transform == 'rank':
                     df[final_col] = df.groupby(cs_group)[base_col].rank(pct=True)
@@ -1114,10 +1114,10 @@ class FeatureEngine:
         # Drop the base columns ONLY if they weren't explicitly requested as their own standalone feature
         cols_to_drop =[c for c in base_cols_used_for_transforms if c not in final_requested_cols]
         
-        # Drop macro_sector so it doesn't leak into the model's feature set
-        if getattr(self, 'needs_sector_data', False) and 'macro_sector' in df.columns:
+        # Drop NAICS_macro so it doesn't leak into the model's feature set
+        if getattr(self, 'needs_sector_data', False) and 'NAICS_macro' in df.columns:
             if not any(r.name == 'SECTOR' for r in self.requests):
-                cols_to_drop.append('macro_sector')
+                cols_to_drop.append('NAICS_macro')
                 
         if cols_to_drop:
             df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
