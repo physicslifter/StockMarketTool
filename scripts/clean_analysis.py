@@ -687,7 +687,8 @@ class Model:
 
     def train_model(self, 
                     perturb_hyperparameters:bool = False,
-                    inject_noise:bool = False):
+                    inject_noise:bool = False,
+                    show_feature_importance:bool = True):
         '''
         perturb_hyperparameters: adds 
         inject_noise: 
@@ -743,7 +744,7 @@ class Model:
                 valid_sets=[lgb.Dataset(self.X_val, label=self.y_val)],
                 callbacks=[lgb.early_stopping(stopping_rounds=50)]
             )
-        self.test_model()
+        self.test_model(show_feature_importance = show_feature_importance)
         if self.has_folder == True:
             self.model.save_model(f"{self.model_folder}/model.txt")
             info = {
@@ -752,7 +753,7 @@ class Model:
             info_df = pd.DataFrame(info)
             info_df.to_csv(f"{self.model_folder}/info.csv")
 
-    def test_model(self):
+    def test_model(self, show_feature_importance:bool = True):
         """Tests the model after generating
         """
         predictions = self.model.predict(self.X_test)
@@ -809,10 +810,10 @@ class Model:
             print(f"Robust IC-IR: {ic_ir:.4f}")                      
             print(f"Robust Annualized IC-IR: {ann_ic_ir:.4f}")
             print(f"Robust IC T-Statistic: {t_stat:.4f}")
-
-        lgb.plot_importance(self.model, importance_type = 'gain', figsize = (10, 6), title = "Feature Importance")
-        plt.tight_layout()
-        plt.show()
+        if show_feature_importance == True:
+            lgb.plot_importance(self.model, importance_type = 'gain', figsize = (10, 6), title = "Feature Importance")
+            plt.tight_layout()
+            plt.show()
 
     def _calculate_robust_ic_metrics(self):
         """
