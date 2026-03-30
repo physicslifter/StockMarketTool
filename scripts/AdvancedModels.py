@@ -11,7 +11,7 @@ import warnings
 import re
 import math
 import random
-from skfolio.model_selection import CombinatorialPurgedCV
+#from skfolio.model_selection import CombinatorialPurgedCV
 from clean_analysis import Model
 
 #===================
