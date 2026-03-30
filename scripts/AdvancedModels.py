@@ -94,7 +94,7 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
 
         # 4. Tune and Train (this automatically calls test_model and saves model.txt)
         model.tune_params(n_trials=n_trials)
-        model.train_model()
+        model.train_model(show_feature_importance = False)
 
         # 5. Extract Out-Of-Sample Predictions
         fold_oos_data = model.test_df.copy()
