@@ -569,10 +569,11 @@ FEATURE_REGISTRY = {
 class FeatureRequest:
     def __init__(self, name, params=None, shift=0, input_type='log_price', 
                  market_ref=None, alias=None, deriv_order=0, 
-                 transform=None, transform_params=None):
+                 transform=None, transform_params=None, neutralization='market'):
         """
         transform: 'rank', 'demean', 'binary', 'regime', 'cs_zscore'
         transform_params: dict, e.g. {'threshold': 0.02} for targets
+        neutralization: should be market or sector. Transform performs relative to this parameter
         """
         if name not in FEATURE_REGISTRY:
             raise ValueError(f"Feature '{name}' not found in Registry")
@@ -590,6 +591,7 @@ class FeatureRequest:
         self.deriv_order = deriv_order
         self.transform = transform
         self.transform_params = transform_params if transform_params else {}
+        self.neutralization = neutralization
         
         # --- Naming Logic ---
         if shift >= 0: type_suffix = "T"
@@ -618,8 +620,13 @@ class FeatureRequest:
 
         # 2. Generate the FINAL name (Including transforms)
         self.col_name = self.base_col_name
+        # 2. Generate the FINAL name (Including transforms)
+        self.col_name = self.base_col_name
         if self.transform:
-            self.col_name += f"_{self.transform.upper()}"
+            if self.transform in ['rank', 'demean', 'cs_zscore'] and self.neutralization == 'sector':
+                self.col_name += f"_SECTOR_{self.transform.upper()}"
+            else:
+                self.col_name += f"_{self.transform.upper()}"
 
 #rate feature request
 class RateFeatureRequest:
@@ -1025,6 +1032,16 @@ class FeatureEngine:
 
         print("Phase 3: Computing Transforms & Targets...")
         
+        # --- NEW: Load sector data only if requested for neutralization ---
+        self.needs_sector_data = any(
+            req.transform in ['rank', 'demean', 'cs_zscore'] and getattr(req, 'neutralization', 'market') == 'sector'
+            for req in self.requests
+        )
+        if self.needs_sector_data:
+            sectors_df = pd.read_csv("../Data/sectors_info.csv", usecols=['act_symbol', 'macro_sector']).drop_duplicates(subset=['act_symbol'])
+            df = df.merge(sectors_df, on='act_symbol', how='left')
+            df['macro_sector'] = df['macro_sector'].fillna('UNKNOWN')
+
         # NEW: Keep track of base columns that were transformed
         base_cols_used_for_transforms = set()
         
@@ -1051,17 +1068,20 @@ class FeatureEngine:
                     continue
 
                 # --- APPLY TRANSFORMS ---
+                # Determine grouping (Market vs Sector) for relevant features
+                if req.transform in['rank', 'demean', 'cs_zscore']:
+                    cs_group = ['date', 'macro_sector'] if getattr(req, 'neutralization', 'market') == 'sector' else ['date']
+                
                 if req.transform == 'rank':
-                    df[final_col] = df.groupby('date')[base_col].rank(pct=True)
+                    df[final_col] = df.groupby(cs_group)[base_col].rank(pct=True)
                     
                 elif req.transform == 'demean':
-                    means = df.groupby('date')[base_col].transform('mean')
+                    means = df.groupby(cs_group)[base_col].transform('mean')
                     df[final_col] = df[base_col] - means
 
                 elif req.transform == 'cs_zscore':
-                    means = df.groupby('date')[base_col].transform('mean')
-                    stds = df.groupby('date')[base_col].transform('std')
-                    # Replace 0 with NaN to prevent division by zero in flat markets
+                    means = df.groupby(cs_group)[base_col].transform('mean')
+                    stds = df.groupby(cs_group)[base_col].transform('std')
                     df[final_col] = (df[base_col] - means) / stds.replace(0, np.nan)
                     
                 elif req.transform == 'binary':
@@ -1092,8 +1112,14 @@ class FeatureEngine:
                 final_requested_cols.add(req.col_name + suffix)
 
         # Drop the base columns ONLY if they weren't explicitly requested as their own standalone feature
-        cols_to_drop = [c for c in base_cols_used_for_transforms if c not in final_requested_cols]
+        cols_to_drop =[c for c in base_cols_used_for_transforms if c not in final_requested_cols]
+        
+        # Drop macro_sector so it doesn't leak into the model's feature set
+        if getattr(self, 'needs_sector_data', False) and 'macro_sector' in df.columns:
+            if not any(r.name == 'SECTOR' for r in self.requests):
+                cols_to_drop.append('macro_sector')
+                
         if cols_to_drop:
-            df.drop(columns=cols_to_drop, inplace=True)
+            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
 
         return df
