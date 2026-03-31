@@ -13,7 +13,8 @@ Model
 PortfolioStrategy
     - incorporates the model
 '''
-
+from FundamentalEngine import *
+from FundamentalEngine import *
 import pandas as pd
 import numpy as np
 from joblib import Parallel, delayed
@@ -378,23 +379,28 @@ class Universe:
         return final_df
 
 class Model:
-    def __init__(self, universe_path, model_folder = None):
+    def __init__(self, universe_path, fund_data_path=None, model_folder=None):
         '''
         universe_path should be the path to the universe file, saved as feather
+        fund_data_path (optional) path to quarterly fundamental data
         '''
         self.universe_path = universe_path
-        self.data = pd.read_feather(universe_path) #all data to train the model on
+        self.fund_data_path = fund_data_path  # <-- Store the path, but don't load the data yet
+        
+        self.data = pd.read_feather(universe_path) # Load price data immediately
         self.data["date"] = pd.to_datetime(self.data["date"])
-        self.has_features = False #no features upon initialization
-        self.has_target = False #no target upon initialization
-        self.data_split = False #default whether data has been split to false
+        
+        self.has_features = False 
+        self.has_target = False 
+        self.data_split = False 
         self.params_tuned = False
         self.variables_generated = False
+        
         if type(model_folder) == type(None):
             self.has_folder = False
         else:
             self.has_folder = True
-            os.makedirs(model_folder, exist_ok = True)
+            os.makedirs(model_folder, exist_ok=True)
         self.model_folder = model_folder
         self.data_generated = False
 
@@ -674,13 +680,64 @@ class Model:
         if self.has_target == False:
             raise Exception("Model does not have a target")
         self.variables_generated = True
-        feature_engine = FeatureEngine(feature_requests = self.features + [self.target])
+
+        # 1. SEPARATE REQUESTS
+        price_requests = [req for req in self.features if not isinstance(req, FundamentalRequest)]
+        fund_requests = [req for req in self.features if isinstance(req, FundamentalRequest)]
+
+        # 2. COMPUTE PRICE FEATURES (Always runs)
+        # We assume target is always a price-derived feature (e.g., TARGET_SHARPE)
+        feature_engine = FeatureEngine(feature_requests=price_requests + [self.target])
         self.data = feature_engine.compute(self.data)
-        #drop rows where targets and features are none
-        #print(self.data.keys(), len(self.data))
+
+        # 3. LAZY LOAD & COMPUTE FUNDAMENTALS (Only runs if requested)
+        if fund_requests:
+            # Defensive check: Did they provide a path?
+            if self.fund_data_path is None:
+                raise Exception("Fundamental features requested, but 'fund_data_path' was not provided to the Model.")
+            
+            # Defensive check: Does the file actually exist?
+            if not os.path.exists(self.fund_data_path):
+                raise Exception(f"Fundamental data file not found at: {self.fund_data_path}")
+
+            print("Loading and computing fundamental features...")
+            
+            # Lazy Load: Read into memory ONLY now
+            fund_df = pd.read_feather(self.fund_data_path)
+            fund_df["date"] = pd.to_datetime(fund_df["date"])
+            
+            # Compute Sparse Features
+            fund_engine = FundamentalEngine(requests=fund_requests)
+            fund_df = fund_engine.compute(fund_df)
+
+            # Extract generated columns
+            fund_cols = [req.alias for req in fund_requests]
+            
+            # Isolate and Clean for the Merge
+            fund_df = fund_df[['act_symbol', 'date'] + fund_cols].copy()
+            fund_df = fund_df.dropna(subset=fund_cols, how='all')
+            
+            # CRITICAL: strictly sort by date and drop intra-day duplicates for merge_asof
+            fund_df = fund_df.sort_values('date').drop_duplicates(subset=['act_symbol', 'date'], keep='last')
+            self.data = self.data.sort_values('date')
+
+            print("Merging fundamental features into daily price data...")
+            self.data = pd.merge_asof(
+                left=self.data,
+                right=fund_df,
+                on='date',
+                by='act_symbol',
+                direction='backward'
+            )
+
+        # 4. FINAL CLEANUP
+        # Because FundamentalRequest.alias defaults to 'F_{name}', 
+        # this naturally cleans both Price and Fundamental features flawlessly!
         feature_keys = [key for key in self.data.keys() if "F" in key.split("_")]
         target_key = [key for key in self.data.keys() if "T" in key.split("_")][0]
-        self.data = self.data.dropna(subset = feature_keys + [target_key]) #drop rows with nan for features or targets
+        
+        # Drop rows with NaN for features or targets
+        self.data = self.data.dropna(subset=feature_keys + [target_key]) 
         self.feature_keys = feature_keys
         self.target_key = target_key
         self.data_generated = True
