@@ -13,6 +13,7 @@ import math
 import random
 #from skfolio.model_selection import CombinatorialPurgedCV
 from clean_analysis import Model
+from pdb import set_trace as st
 
 #===================
 #Walk forward strategy for model
@@ -89,6 +90,7 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
 
         # If the test set ends up empty (e.g. data ends mid-year), skip it
         if model.test_df.empty:
+            st()
             print("Test set is empty. Ending Walk-Forward.")
             break
 
