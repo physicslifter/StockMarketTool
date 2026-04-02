@@ -164,18 +164,40 @@ FUNDAMENTAL_REGISTRY = {
     'DAYS_SINCE_LAST_EARNINGS': {
         'fn': lambda df: (pd.to_datetime(df['date']) - pd.to_datetime(df['last_earnings_date'])).dt.days,
         'inputs':['date', 'last_earnings_date']
-    }
+    },
+    # --- DATA AVAILABILITY ---
+    'HAS_FUNDAMENTALS': {
+        # If a row exists in the fundamental dataframe for this stock/quarter, 
+        # it inherently means fundamental data is available. We assign it a 1.
+        # (clean_analysis.py will automatically fill the missing/NaN rows with 0 later).
+        'fn': lambda df: np.ones(len(df)),
+        'inputs': []  # No specific raw columns are required
+    },
 }
 
 # ==========================================
 # 2. THE REQUEST OBJECT
 # ==========================================
 class FundamentalRequest:
-    def __init__(self, name, alias=None):
+    def __init__(self, name, alias=None, transform=None, transform_params=None, neutralization='market'):
         if name not in FUNDAMENTAL_REGISTRY:
             raise ValueError(f"Fundamental Feature '{name}' not found in Registry")
         self.name = name
-        self.alias = alias if alias else f"F_{name}"
+        
+        self.transform = transform
+        self.transform_params = transform_params if transform_params else {}
+        self.neutralization = neutralization
+        
+        # 1. Base Name (The raw computed feature, e.g., F_ROE)
+        self.base_alias = alias if alias else f"F_{name}"
+        
+        # 2. Final Name (Appends the transform suffix, perfectly matching FeatureEngine)
+        self.alias = self.base_alias
+        if self.transform:
+            if self.transform in ['rank', 'demean', 'cs_zscore'] and self.neutralization == 'sector':
+                self.alias += f"_SECTOR_{self.transform.upper()}"
+            else:
+                self.alias += f"_{self.transform.upper()}"
 
 # ==========================================
 # 3. THE ENGINE
@@ -187,30 +209,124 @@ class FundamentalEngine:
     def compute(self, df):
         print(f"Fundamental Engine: Computing {len(self.requests)} sparse features...")
         
+        # 0. MAP DOLTHUB COLUMNS TO REGISTRY EXPECTATIONS
+        # This ensures your specific CSV works perfectly with the standard registry formulas
+        rename_map = {
+            'sales': 'revenue',
+            'diluted_net_eps': 'eps',
+            'net_cash_from_operating_activities': 'operating_cash_flow',
+            'inventories': 'inventory',
+            'total_current_assets': 'current_assets',
+            'total_current_liabilities': 'current_liabilities',
+            'total_liabilities': 'total_debt', 
+            'pretax_income': 'operating_income' 
+        }
+        df = df.rename(columns=rename_map)
+
         # 1. Safety Sort (Critical for Growth/Shift calculations grouping by symbol)
         df = df.sort_values(['act_symbol', 'date']).copy()
         
-        # 2. Compute
+        # 2. Compute Base Features
         for req in self.requests:
             print(f"  -> {req.name}")
             config = FUNDAMENTAL_REGISTRY[req.name]
             
-            # Check if required raw columns exist
-            missing =[col for col in config['inputs'] if col not in df.columns]
+            missing = [col for col in config['inputs'] if col not in df.columns]
             
             if missing:
                 print(f"[Warning] Missing raw columns {missing} for {req.name}. Yielding NaNs.")
-                df[req.alias] = np.nan
+                df[req.base_alias] = np.nan
             else:
                 try:
-                    # Execute the registry function
-                    df[req.alias] = config['fn'](df)
-                    
-                    # Clean up infs caused by extremely small denominator values
-                    df[req.alias] = df[req.alias].replace([np.inf, -np.inf], np.nan)
-                    
+                    df[req.base_alias] = config['fn'](df)
+                    df[req.base_alias] = df[req.base_alias].replace([np.inf, -np.inf], np.nan)
                 except Exception as e:
                     print(f"[Error] Failed to compute {req.name}: {e}. Yielding NaNs.")
-                    df[req.alias] = np.nan
+                    df[req.base_alias] = np.nan
+                    
+        # ---------------------------------------------------------
+        # 3. ANTI-LOOK-AHEAD BIAS LOGIC (THE 3-MONTH SHIFT)
+        # ---------------------------------------------------------
+        print("Fundamental Engine: Applying 3-Month Lag to prevent Look-Ahead Bias...")
+        
+        # Shift the reporting date forward by 3 months. 
+        # The Q3 report (10-31) becomes "visible" to the model on 01-31.
+        df['date'] = df['date'] + pd.DateOffset(months=3)
+        
+        # Force the date to snap to the exact End of the Month.
+        # (e.g. 04-30 + 3 months -> 07-30. This corrects it to 07-31).
+        df['date'] = df['date'] + pd.offsets.MonthEnd(0)
+        
+        # ---------------------------------------------------------
+        # 4. APPLY TRANSFORMS AND NEUTRALIZATIONS
+        # ---------------------------------------------------------
+        
+        # Load Sector Data if required
+        self.needs_sector_data = any(
+            req.transform in ['rank', 'demean', 'cs_zscore'] and getattr(req, 'neutralization', 'market') == 'sector'
+            for req in self.requests
+        )
+        if self.needs_sector_data:
+            sectors_df = pd.read_csv("../Data/sectors_info.csv", usecols=['act_symbol', 'NAICS_macro']).drop_duplicates(subset=['act_symbol'])
+            df = df.merge(sectors_df, on='act_symbol', how='left')
+            df['NAICS_macro'] = df['NAICS_macro'].fillna('UNKNOWN')
+
+        # Create Temporary Quarter Column for valid Cross-Sectional Math on shifted dates
+        df['_temp_quarter'] = df['date'].dt.to_period('Q')
+
+        base_cols_used_for_transforms = set()
+        
+        for req in self.requests:
+            if not req.transform:
+                continue
+
+            base_col = req.base_alias
+            final_col = req.alias
+            
+            if base_col not in df.columns:
+                continue
+
+            # Determine grouping: Market (Quarter) vs Sector (Quarter + Sector)
+            if req.transform in ['rank', 'demean', 'cs_zscore']:
+                cs_group = ['_temp_quarter', 'NAICS_macro'] if getattr(req, 'neutralization', 'market') == 'sector' else ['_temp_quarter']
+            
+            # Apply identical transformations to FeatureEngine
+            if req.transform == 'rank':
+                df[final_col] = df.groupby(cs_group)[base_col].rank(pct=True)
                 
+            elif req.transform == 'demean':
+                means = df.groupby(cs_group)[base_col].transform('mean')
+                df[final_col] = df[base_col] - means
+
+            elif req.transform == 'cs_zscore':
+                means = df.groupby(cs_group)[base_col].transform('mean')
+                stds = df.groupby(cs_group)[base_col].transform('std')
+                df[final_col] = (df[base_col] - means) / stds.replace(0, np.nan)
+                
+            elif req.transform == 'binary':
+                thresh = req.transform_params.get('threshold', 0)
+                df[final_col] = np.where(df[base_col] > thresh, 1, 0)
+                df.loc[df[base_col].isna(), final_col] = np.nan
+                
+            elif req.transform == 'regime':
+                thresh = req.transform_params.get('threshold', 0.02)
+                conditions = [(df[base_col] > thresh), (df[base_col] < -thresh)]
+                choices = [1, -1]
+                df[final_col] = np.select(conditions, choices, default=0)
+                df.loc[df[base_col].isna(), final_col] = np.nan
+
+            base_cols_used_for_transforms.add(base_col)
+
+        # 5. Cleanup Memory and Intermediate Columns
+        df.drop(columns=['_temp_quarter'], inplace=True)
+
+        final_requested_cols = set([req.alias for req in self.requests])
+        cols_to_drop = [c for c in base_cols_used_for_transforms if c not in final_requested_cols]
+        
+        if getattr(self, 'needs_sector_data', False) and 'NAICS_macro' in df.columns:
+            cols_to_drop.append('NAICS_macro')
+            
+        if cols_to_drop:
+            df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+
         return df
