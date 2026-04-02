@@ -691,35 +691,31 @@ class Model:
         self.data = feature_engine.compute(self.data)
 
         # 3. LAZY LOAD & COMPUTE FUNDAMENTALS (Only runs if requested)
+        fund_cols = []
         if fund_requests:
-            # Defensive check: Did they provide a path?
             if self.fund_data_path is None:
                 raise Exception("Fundamental features requested, but 'fund_data_path' was not provided to the Model.")
-            
-            # Defensive check: Does the file actually exist?
             if not os.path.exists(self.fund_data_path):
                 raise Exception(f"Fundamental data file not found at: {self.fund_data_path}")
 
             print("Loading and computing fundamental features...")
             
-            # Lazy Load: Read into memory ONLY now
             fund_df = pd.read_feather(self.fund_data_path)
             fund_df["date"] = pd.to_datetime(fund_df["date"])
             
-            # Compute Sparse Features
             fund_engine = FundamentalEngine(requests=fund_requests)
             fund_df = fund_engine.compute(fund_df)
 
-            # Extract generated columns
             fund_cols = [req.alias for req in fund_requests]
             
-            # Isolate and Clean for the Merge
             fund_df = fund_df[['act_symbol', 'date'] + fund_cols].copy()
             fund_df = fund_df.dropna(subset=fund_cols, how='all')
             
-            # CRITICAL: strictly sort by date and drop intra-day duplicates for merge_asof
             fund_df = fund_df.sort_values('date').drop_duplicates(subset=['act_symbol', 'date'], keep='last')
             self.data = self.data.sort_values('date')
+
+            self.data['date'] = pd.to_datetime(self.data['date']).astype('datetime64[ns]')
+            fund_df['date'] = pd.to_datetime(fund_df['date']).astype('datetime64[ns]')
 
             print("Merging fundamental features into daily price data...")
             self.data = pd.merge_asof(
@@ -729,15 +725,23 @@ class Model:
                 by='act_symbol',
                 direction='backward'
             )
+            
+            # --- NEW: Fill HAS_FUNDAMENTALS missing values with 0 ---
+            # Finds the column regardless of whether it was ranked, z-scored, or raw
+            has_fund_keys = [c for c in fund_cols if 'HAS_FUNDAMENTALS' in c]
+            for c in has_fund_keys:
+                self.data[c] = self.data[c].fillna(0)
 
         # 4. FINAL CLEANUP
-        # Because FundamentalRequest.alias defaults to 'F_{name}', 
-        # this naturally cleans both Price and Fundamental features flawlessly!
         feature_keys = [key for key in self.data.keys() if "F" in key.split("_")]
         target_key = [key for key in self.data.keys() if "T" in key.split("_")][0]
         
-        # Drop rows with NaN for features or targets
-        self.data = self.data.dropna(subset=feature_keys + [target_key]) 
+        # --- NEW: Smart Drop Logic ---
+        # We MUST drop rows if they are missing the Target or Daily Price features.
+        # But we KEEP rows if they are missing Fundamental features (LightGBM loves NaNs!)
+        price_feature_keys = [k for k in feature_keys if k not in fund_cols]
+        
+        self.data = self.data.dropna(subset=price_feature_keys + [target_key]) 
         self.feature_keys = feature_keys
         self.target_key = target_key
         self.data_generated = True
