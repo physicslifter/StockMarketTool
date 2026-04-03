@@ -14,7 +14,6 @@ PortfolioStrategy
     - incorporates the model
 '''
 from FundamentalEngine import *
-from FundamentalEngine import *
 import pandas as pd
 import numpy as np
 from joblib import Parallel, delayed
@@ -684,6 +683,11 @@ class Model:
         # 1. SEPARATE REQUESTS
         price_requests = [req for req in self.features if not isinstance(req, FundamentalRequest)]
         fund_requests = [req for req in self.features if isinstance(req, FundamentalRequest)]
+
+        #drop price cols from data
+        #(not needed bc prices are calculated inside of FeatureEngine)
+        cols_to_keep = ['date', 'act_symbol'] + [col for col in self.data.columns if str(col).startswith('F_')]
+        self.data = self.data[cols_to_keep].copy()
 
         # 2. COMPUTE PRICE FEATURES (Always runs)
         # We assume target is always a price-derived feature (e.g., TARGET_SHARPE)
