@@ -3,6 +3,7 @@ import numpy as np
 import talib
 from numpy.lib.stride_tricks import sliding_window_view
 import gc
+import pyarrow.dataset as ds
 
 #for viewing exceptions
 import traceback
@@ -367,7 +368,7 @@ def calc_forward_return(close, timeperiod=1):
     
     # Calculate rolling forward sum of returns
     indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=timeperiod)
-    fwd_ret = log_ret.rolling(window=indexer).sum()
+    fwd_ret = log_ret.rolling(window=indexer, min_periods = timeperiod).sum()
     
     return fwd_ret.values
 
@@ -671,12 +672,46 @@ class FeatureEngine:
     def __init__(self, feature_requests):
         self.requests = feature_requests
 
-    def compute(self, df):
-        # 0. Safety Sort
-        if not df.attrs.get("is_sorted", False):
-            df = df.sort_values(['act_symbol', 'date'])
-            df.attrs["is_sorted"] = True
+    def compute(self, input_df, raw_data_path="../Data/all_ohlcv.feather"):
+        """
+        df: The universe mask containing at minimum ['date', 'act_symbol'].
+        raw_data_path: Path to the contiguous, unfiltered OHLCV dataset.
+        """
+        print("FeatureEngine: Loading just-in-time contiguous data...")
         
+        # 1. RENAME THE MASK
+        # We save the incoming dataframe (your universe mask) under a new name.
+        universe_mask = input_df[['date', 'act_symbol']].copy()
+        
+        # 2. CALCULATE BUFFERS
+        max_lookback = max([req.params.get('timeperiod', 1) for req in self.requests if hasattr(req, 'params')], default=1)
+        max_fwd = max([abs(req.shift) for req in self.requests], default=0)
+
+        buffer_days_back = pd.Timedelta(days=int(max_lookback * 1.5) + 10)
+        buffer_days_fwd = pd.Timedelta(days=int(max_fwd * 1.5) + 10)
+
+        min_date = universe_mask['date'].min() - buffer_days_back
+        max_date = universe_mask['date'].max() + buffer_days_fwd
+        valid_symbols = universe_mask['act_symbol'].unique()
+
+        # 3. PYARROW DATA LOAD
+        import pyarrow.dataset as ds
+        dataset = ds.dataset(raw_data_path, format="feather")
+        filter_cond = (
+            (ds.field('act_symbol').isin(valid_symbols)) & 
+            (ds.field('date') >= min_date) & 
+            (ds.field('date') <= max_date)
+        )
+        
+        # Load the contiguous data
+        raw_df = dataset.to_table(filter=filter_cond).to_pandas()
+        
+        # 4. THE TRICK: REASSIGN `df`
+        # We assign the raw contiguous data to the variable name `df`.
+        # Now, all your existing code below this line will run on the contiguous data automatically!
+        df = raw_df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
+        df['date'] = pd.to_datetime(df['date'])
+
         # -------------------------------------------------------
         # PHASE 1: GLOBAL CALCULATIONS (Vectorized)
         # -------------------------------------------------------
@@ -1044,7 +1079,15 @@ class FeatureEngine:
 
         # NEW: Keep track of base columns that were transformed
         base_cols_used_for_transforms = set()
+
+        # ---> INSERT MERGE HERE <---
+        # We inner merge the universe mask back onto `df`.
+        # This deletes the burn-in rows, and overwrites `df` to be the filtered universe again!
+        df = pd.merge(universe_mask, df, on=['date', 'act_symbol'], how='inner')
         
+        # Re-sort to fix Pandas merge scrambling
+        df = df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
+
         for req in self.requests:
             #print(req.name)
             if not req.transform:
@@ -1121,5 +1164,7 @@ class FeatureEngine:
                 
         if cols_to_drop:
             df.drop(columns=cols_to_drop, inplace=True, errors='ignore')
+
+        # ... Your existing Phase 3 `cs_zscore` code runs perfectly as-is on `df` ...
 
         return df
