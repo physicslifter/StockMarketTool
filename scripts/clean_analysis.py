@@ -250,7 +250,7 @@ class AdvancedStatsFilter(Filter):
         
         # 6. Return Reduced DF
         return df[df['act_symbol'].isin(winners)].copy()
-    
+
 class SecurityTypeFilter(Filter):
     def __init__(self, valid_tickers_path: str = "../Data/valid_equity_tickers.feather"):
         """
@@ -291,12 +291,65 @@ class Universe:
                 raise Exception("filters must be valid subclass of Filter")
         self.filters += filters
 
+    '''
+    OLD before fix on 4/4//2026
+
     def get_universe_for_month(self, target_date):
         target_date = pd.to_datetime(target_date)
         
         # 1. Start with a working copy of the master data
         # We must copy so we don't break the master for future runs
         working_df = self.master_df[(self.master_df.date >= target_date - pd.DateOffset(years = 1)) & (self.master_df.date < target_date)]
+        print(f"Generating universe for {target_date.date()}...")
+        print(f"  -> Starting Count: {working_df['act_symbol'].nunique()}")
+        # 2. Pipeline Loop
+        #isolate data for the year and month we'rd on
+        for f in self.filters:
+            if working_df.empty:
+                print("  -> Universe Died (0 stocks). Stopping.")
+                break
+                
+            # Apply Filter: Old DF -> New Smaller DF
+            working_df = f.apply(working_df, target_date)
+            
+            count = working_df['act_symbol'].nunique()
+            print(f"  -> {f.name}: {count} stocks remaining")
+
+        survivors = working_df['act_symbol'].unique().tolist()
+        next_month = target_date + pd.DateOffset(months=1)
+        future_data = self.master_df[
+            (self.master_df['date'] >= target_date) & 
+            (self.master_df['date'] < next_month) & 
+            (self.master_df['act_symbol'].isin(survivors))
+        ].copy()
+
+        # 3. Return final list of survivors
+        #return working_df['act_symbol'].unique().tolist()
+        print(target_date, working_df.date.min(), working_df.date.max())
+        # Diagnostic: for a month that flatlines, check the overlap
+        price_tickers_in_window = set(working_df['act_symbol'].unique())
+        overlap = price_tickers_in_window & self.filters[0].valid_tickers  # SecurityTypeFilter
+        print(f"  Price tickers in window: {len(price_tickers_in_window)}")
+        print(f"  Valid tickers loaded:    {len(self.filters[0].valid_tickers)}")
+        print(f"  Overlap:                 {len(overlap)}")
+        return future_data'''
+    
+    def get_universe_for_month(self, target_date):
+        target_date = pd.to_datetime(target_date)
+    
+        # Determine how far back we need data
+        # Default 1-year window for stats, but extend if a filter needs more history
+        lookback_days = 365
+        for f in self.filters:
+            if isinstance(f, AdvancedStatsFilter) and f.min_history is not None:
+                # Convert trading days to calendar days with margin
+                lookback_days = max(lookback_days, int(f.min_history * 1.5) + 30)
+
+        working_df = self.master_df[
+            (self.master_df.date >= target_date - pd.DateOffset(days=lookback_days)) & 
+            (self.master_df.date < target_date)
+        ]
+
         print(f"Generating universe for {target_date.date()}...")
         print(f"  -> Starting Count: {working_df['act_symbol'].nunique()}")
         # 2. Pipeline Loop
