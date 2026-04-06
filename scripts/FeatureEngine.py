@@ -147,6 +147,10 @@ def calc_hurst(real, timeperiod=100):
     # H = log(R/S) / log(n)
     h = np.log(rs) / np.log(timeperiod)
     
+    # Hurst Estimate — guard against r=0 (constant series)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        h = np.where(r > 0, np.log(rs) / np.log(timeperiod), 0.5)
+
     # 5. Pad the result to match original length
     # We lost 1 point from diff() and (timeperiod-1) points from windowing
     # Total NaN padding needed at the start = timeperiod
@@ -224,6 +228,8 @@ def calc_vwap_zscore(close, volume, timeperiod=20):
     # Fill any initial NaNs (result of rolling window)
     return z_score.values
     
+'''
+OLD: before fix on 4/4/2026
 def calc_adx_regime(high, low, close, timeperiod=14, threshold=25):
     """
     Returns:
@@ -250,6 +256,25 @@ def calc_adx_regime(high, low, close, timeperiod=14, threshold=25):
     # Identify Bearish: Trending AND (MDI > PDI)
     bear_mask = trending & (mdi > pdi)
     regime[bear_mask] = -1
+    
+    return regime
+'''
+def calc_adx_regime(high, low, close, timeperiod=14, threshold=25):
+    adx = talib.ADX(high, low, close, timeperiod=timeperiod)
+    pdi = talib.PLUS_DI(high, low, close, timeperiod=timeperiod)
+    mdi = talib.MINUS_DI(high, low, close, timeperiod=timeperiod)
+    
+    regime = np.zeros_like(adx)
+    trending = (adx > threshold)
+    
+    bull_mask = trending & (pdi > mdi)
+    regime[bull_mask] = 1
+    
+    bear_mask = trending & (mdi > pdi)
+    regime[bear_mask] = -1
+    
+    # Propagate NaN from ADX warm-up instead of masking as 0
+    regime[np.isnan(adx)] = np.nan
     
     return regime
 
@@ -687,12 +712,18 @@ class FeatureEngine:
         max_lookback = max([req.params.get('timeperiod', 1) for req in self.requests if hasattr(req, 'params')], default=1)
         max_fwd = max([abs(req.shift) for req in self.requests], default=0)
 
-        buffer_days_back = pd.Timedelta(days=int(max_lookback * 1.5) + 10)
+        buffer_days_back = pd.Timedelta(days=int(max_lookback * 5) + 30)
         buffer_days_fwd = pd.Timedelta(days=int(max_fwd * 1.5) + 10)
 
         min_date = universe_mask['date'].min() - buffer_days_back
         max_date = universe_mask['date'].max() + buffer_days_fwd
-        valid_symbols = universe_mask['act_symbol'].unique()
+        
+        valid_symbols = universe_mask['act_symbol'].unique().tolist()
+
+        for req in self.requests:
+            if getattr(req, 'market_ref', None) is not None:
+                if req.market_ref not in valid_symbols:
+                    valid_symbols.append(req.market_ref)
 
         # 3. PYARROW DATA LOAD
         import pyarrow.dataset as ds
