@@ -24,6 +24,22 @@ import re
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, roc_auc_score, mean_squared_error
 
+def _save_fold_artifacts(features, target, fold_folder):
+    """
+    Helper for walk-forward
+
+    Saves feature and target request objects to a fold's directory.
+    
+    """
+    import pickle
+    feat_dir = os.path.join(fold_folder, "features")
+    os.makedirs(feat_dir, exist_ok=True)
+    for c, feature in enumerate(features):
+        with open(os.path.join(feat_dir, f'{c}.pkl'), 'wb') as f:
+            pickle.dump(feature, f, pickle.HIGHEST_PROTOCOL)
+    with open(os.path.join(fold_folder, 'target.pkl'), 'wb') as f:
+        pickle.dump(target, f, pickle.HIGHEST_PROTOCOL)
+
 def run_walk_forward_analysis(universe_path, target, features, folder_path,
                               target_type="regression", train_years=4, 
                               val_years=1, test_years=1, n_trials=40):
@@ -37,11 +53,13 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
     # Create the parent directory
     os.makedirs(folder_path, exist_ok=True)
     
-    # Quick load just to find the global start and end years
-    df_temp = pd.read_feather(universe_path)
-    global_start_year = df_temp['date'].dt.year.min()
-    global_end_year = df_temp['date'].dt.year.max()
-    del df_temp
+    model = Model(universe_path)
+    model.add_features(features, save=False)
+    model.add_target(target, target_type=target_type, save=False)
+    model.generate_targets_and_features()
+
+    global_start_year = model.data['date'].dt.year.min()
+    global_end_year = model.data['date'].dt.year.max()
 
     all_oos_predictions =[]
     metrics_records =[]
@@ -49,6 +67,7 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
     current_year = global_start_year
     fold = 1
 
+    '''
     # 2. Instantiate a fresh model for this specific fold, passing the fold_folder
     train_start = f"{current_year}-01-01"
     val_start = f"{current_year + train_years}-01-01"
@@ -56,6 +75,7 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
     test_end = f"{current_year + train_years + val_years + test_years}-01-01"
     fold_folder = os.path.join(folder_path, f"fold_{test_start[:4]}_{test_end[:4]}")
     model = Model(universe_path, model_folder=fold_folder)
+    '''
 
     while True:
         # Define the chronological window boundaries
@@ -75,15 +95,15 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
         print(f"Test  : {test_start} to {test_end}")
         print("="*60)
 
-        # 1. Create a specific sub-folder for this fold
         fold_folder = os.path.join(folder_path, f"fold_{test_start[:4]}_{test_end[:4]}")
-        
-        # 2. Instantiate a fresh model for this specific fold, passing the fold_folder
-        model = Model(universe_path, model_folder=fold_folder)
-        
-        # Save=True ensures the targets and features are pickled into the fold folder
-        model.add_features(features, save=True)
-        model.add_target(target, target_type=target_type, save=True)
+        os.makedirs(fold_folder, exist_ok=True)
+        model.model_folder = fold_folder
+        model.has_folder = True
+
+        _save_fold_artifacts(features, target, fold_folder)
+
+        model.params_tuned = False
+        model.split_data_by_dates(train_start, val_start, test_start, test_end)
 
         # 3. Split using the date-based method (this automatically saves dates.csv)
         model.split_data_by_dates(train_start, val_start, test_start, test_end)
