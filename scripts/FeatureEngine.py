@@ -344,30 +344,30 @@ def calc_gap_sigma(open_p, high, low, close, timeperiod=14):
         
     return sigma.values
 
-def calc_forward_sharpe(close, timeperiod=5):
+def calc_forward_sharpe(open_p, timeperiod=5):
     """
-    Calculates the Forward Sharpe Ratio (Target).
-    Formula: Future_Return / Future_Volatility
+    Calculates Forward Sharpe Ratio assuming Open-to-Open execution.
+    Target on Row T = Return from Open(T) to Open(T+5)
     """
-    # 1. Log Returns
-    s_close = pd.Series(close)
-    log_ret = np.log(s_close / s_close.shift(1))
+    s_open = pd.Series(open_p)
     
-    # 2. Rolling Forward Window
-    # We use a trick: Reverse the series, calculate rolling, then reverse back.
-    # This allows us to get the "Next 5 days" statistics aligned with "Today".
+    # 1. Total Trade Return (Open T to Open T+N)
+    # shift(-timeperiod) grabs the Open price exactly 5 days from today
+    total_ret = np.log(s_open.shift(-timeperiod) / s_open)
+    
+    # 2. Daily Volatility during the hold
+    # We need the std dev of the daily open-to-open returns.
+    # daily_fwd_ret on Row T = ln(Open_{T+1} / Open_{T})
+    daily_fwd_ret = np.log(s_open.shift(-1) / s_open)
+    
+    # Standard deviation of those daily returns over the next 5 days
     indexer = pd.api.indexers.FixedForwardWindowIndexer(window_size=timeperiod)
-    
-    # Sum of returns over next N days
-    fwd_ret = log_ret.rolling(window=indexer).sum()
-    
-    # Std Dev of returns over next N days
-    fwd_std = log_ret.rolling(window=indexer).std()
+    fwd_std = daily_fwd_ret.rolling(window=indexer, min_periods=timeperiod).std(ddof=1)
     
     # 3. Calculate Sharpe
-    # Add epsilon to prevent division by zero
-    sharpe = fwd_ret / (fwd_std + 1e-6)
-    
+    with np.errstate(divide='ignore', invalid='ignore'):
+        sharpe = total_ret / (fwd_std + 1e-8) # 1e-8 prevents div-by-zero
+        
     return sharpe.values
 
 def calc_intraday_log_ret(open_p, close_p, timeperiod=1):
@@ -409,6 +409,29 @@ def calc_rate_velocity(rate, timeperiod=1):
     """Calculates absolute change over time (Velocity/Momentum)"""
     s = pd.Series(rate)
     return s.diff(timeperiod).values
+
+def calc_vol_adj_mom(close, timeperiod=20):
+    """
+    Volatility-Adjusted Momentum (Information Ratio proxy).
+    Formula: Sum of N-day log returns / StdDev of N-day log returns
+    """
+    s_close = pd.Series(close)
+    
+    # 1. Daily log returns
+    daily_log_ret = np.log(s_close / s_close.shift(1))
+    
+    # 2. N-day Cumulative Return (Numerator)
+    # This is mathematically identical to ln(Close_t / Close_t-N)
+    roll_ret = daily_log_ret.rolling(window=timeperiod).sum()
+    
+    # 3. N-day Volatility (Denominator)
+    roll_std = daily_log_ret.rolling(window=timeperiod).std(ddof=1)
+    
+    # 4. Volatility-Adjusted Momentum
+    with np.errstate(divide='ignore', invalid='ignore'):
+        vol_adj_mom = roll_ret / (roll_std + 1e-8) # 1e-8 prevents div-by-zero on flatlines
+        
+    return vol_adj_mom.values
 
 # ==========================================
 # 1. THE REGISTRY
@@ -539,7 +562,7 @@ FEATURE_REGISTRY = {
     'TARGET_SHARPE': {
         'type': 'custom_stat',
         'fn': calc_forward_sharpe,
-        'inputs': ['close'], # We calculate returns internally
+        'inputs': ['open'], # We calculate returns internally
         'outputs': ['real']
     },
 
@@ -583,6 +606,13 @@ FEATURE_REGISTRY = {
     'SECTOR': {
         'type': 'static_categorical',
         'outputs': ['real'] 
+    },
+
+    'MOM_VOL_ADJ': {
+        'type': 'custom_stat',
+        'fn': calc_vol_adj_mom,
+        'inputs': ['close'],
+        'outputs': ['real']
     },
 
 }
