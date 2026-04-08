@@ -615,6 +615,13 @@ FEATURE_REGISTRY = {
         'outputs': ['real']
     },
 
+    'VIX_ZSCORE': {
+    'type': 'custom_stat',
+    'fn': calc_zscore,
+    'inputs': ['vix'],       # requires 'vix' column in your data
+    'outputs': ['real']
+}
+
 }
 
 # ==========================================
