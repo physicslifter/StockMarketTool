@@ -433,6 +433,46 @@ def calc_vol_adj_mom(close, timeperiod=20):
         
     return vol_adj_mom.values
 
+def calc_diffusion_index(df, timeperiod=21):
+    """Fraction of stocks with positive N-day log returns."""
+    log_ret = np.log(df.groupby('act_symbol')['close'].shift(0) /
+                     df.groupby('act_symbol')['close'].shift(timeperiod))
+    return df.assign(_ret=log_ret).groupby('date')['_ret'].apply(
+        lambda x: (x > 0).sum() / x.count()
+    )
+
+def calc_advance_decline(df, timeperiod=5):
+    """Smoothed advance-decline spread, normalized to [-1, 1]."""
+    log_ret = np.log(df.groupby('act_symbol')['close'].shift(0) /
+                     df.groupby('act_symbol')['close'].shift(1))
+    daily = df.assign(_ret=log_ret).groupby('date')['_ret'].agg(
+        advances=lambda x: (x > 0).sum(),
+        declines=lambda x: (x < 0).sum(),
+        total=lambda x: x.count(),
+    )
+    ad_spread = (daily['advances'] - daily['declines']) / daily['total']
+    return ad_spread.rolling(timeperiod).mean()
+
+def calc_cs_dispersion(df, timeperiod=21):
+    """Rolling average of daily cross-sectional log return std dev."""
+    log_ret = np.log(df.groupby('act_symbol')['close'].shift(0) /
+                     df.groupby('act_symbol')['close'].shift(1))
+    daily_disp = df.assign(_ret=log_ret).groupby('date')['_ret'].std()
+    return daily_disp.rolling(timeperiod).mean()
+
+def calc_herfindahl(df, timeperiod=21):
+    """Smoothed Herfindahl concentration index of return contributions."""
+    log_ret = np.log(df.groupby('act_symbol')['close'].shift(0) /
+                     df.groupby('act_symbol')['close'].shift(1))
+    def daily_h(group):
+        rets = group.dropna().abs()
+        if len(rets) < 2 or rets.sum() == 0:
+            return np.nan
+        shares = rets / rets.sum()
+        return (shares ** 2).sum()
+    daily = df.assign(_ret=log_ret).groupby('date')['_ret'].apply(daily_h)
+    return daily.rolling(timeperiod).mean()
+
 # ==========================================
 # 1. THE REGISTRY
 # ==========================================
@@ -620,7 +660,38 @@ FEATURE_REGISTRY = {
     'fn': calc_zscore,
     'inputs': ['vix'],       # requires 'vix' column in your data
     'outputs': ['real']
-}
+    },
+
+    'VIX_ZSCORE': {
+    'type': 'macro_derived',
+    'source': 'VIX',
+    'fn': calc_zscore,
+    'outputs': ['real']
+    },
+
+    'DIFFUSION': {
+        'type': 'cross_sectional',
+        'fn': calc_diffusion_index,
+        'outputs': ['real']
+    },
+
+    'AD_SPREAD': {
+        'type': 'cross_sectional',
+        'fn': calc_advance_decline,
+        'outputs': ['real']
+    },
+
+    'CS_DISPERSION': {
+        'type': 'cross_sectional',
+        'fn': calc_cs_dispersion,
+        'outputs': ['real']
+    },
+
+    'HERFINDAHL': {
+        'type': 'cross_sectional',
+        'fn': calc_herfindahl,
+        'outputs': ['real']
+    },
 
 }
 
@@ -703,8 +774,9 @@ class RateFeatureRequest:
         """
         # Force the name to match the FEATURE_REGISTRY perfectly
         clean_name = name.upper().replace("RATE_", "")
+        self.params = {"timeperiod": timeperiod}
         self.name = f"RATE_{clean_name}"
-        
+        self.shift = 0
         self.term1 = term1
         self.term2 = term2
         self.term3 = term3
@@ -820,8 +892,10 @@ class FeatureEngine:
         macro_reqs =[r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] == 'macro']
 
         calendar_reqs =[r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] == 'calendar']
-        other_reqs =[r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] not in['calendar', 'macro', 'static_categorical']]
-        
+        #other_reqs =[r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] not in['calendar', 'macro', 'static_categorical']]
+        other_reqs = [r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] not in 
+              ['calendar', 'macro', 'static_categorical', 'macro_derived', 'cross_sectional']]
+
         for req in calendar_reqs:
             attr = FEATURE_REGISTRY[req.name]['attr']
             # Calendar features usually don't need grouped calc, direct assign
@@ -904,6 +978,11 @@ class FeatureEngine:
             unique_dates = df['date'].unique()
             macro_df = pd.DataFrame({'date': unique_dates}).sort_values('date').reset_index(drop=True)
             
+            #fix datetime error
+            #feather files default to us, csv files default to 
+            macro_df['date'] = macro_df['date'].dt.as_unit('us')
+            rates_raw['date'] = rates_raw['date'].dt.as_unit('us')
+
             # 3. Align bond rates to the stock trading calendar
             # merge_asof(direction='backward') is perfect here. If bonds are closed 
             # (e.g., Veterans Day) but stocks are open, it safely pulls the most recent bond rate.
@@ -991,6 +1070,59 @@ class FeatureEngine:
 
                 # Resort for Phase 2 safety
                 df = df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
+
+        # -------------------------------------------------------
+        # PHASE 1.25: MACRO-DERIVED FEATURES (e.g. VIX z-score)
+        # -------------------------------------------------------
+        macro_derived_reqs = [r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] == 'macro_derived']
+        if macro_derived_reqs:
+            print(f"Phase 1.25: Computing {len(macro_derived_reqs)} Macro-Derived Features...")
+            
+            # Build a single daily macro series from the main df
+            unique_dates = sorted(df['date'].unique())
+            
+            for req in macro_derived_reqs:
+                config = FEATURE_REGISTRY[req.name]
+                source_col = config['source']  # e.g. 'VIX'
+                
+                if source_col not in df.columns:
+                    print(f"  [WARNING] Source column '{source_col}' not found. Skipping {req.name}.")
+                    continue
+                
+                # Extract one value per date for the source
+                daily_source = df.groupby('date')[source_col].first().sort_index()
+                
+                # Apply the function (e.g. calc_zscore)
+                tp = req.params.get('timeperiod', 20)
+                result = config['fn'](daily_source.values, timeperiod=tp)
+                
+                result_series = pd.Series(result, index=daily_source.index, name=req.base_col_name)
+                result_df = result_series.reset_index()
+                
+                df = df.merge(result_df, on='date', how='left')
+            
+            df = df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
+
+        # -------------------------------------------------------
+        # PHASE 1.26: CROSS-SECTIONAL FEATURES (breadth, dispersion)
+        # -------------------------------------------------------
+        cs_reqs = [r for r in feature_reqs if FEATURE_REGISTRY[r.name]['type'] == 'cross_sectional']
+        if cs_reqs:
+            print(f"Phase 1.26: Computing {len(cs_reqs)} Cross-Sectional Features...")
+            
+            for req in cs_reqs:
+                config = FEATURE_REGISTRY[req.name]
+                tp = req.params.get('timeperiod', 21)
+                
+                # These functions take the full df and return a date-indexed Series
+                result_series = config['fn'](df, timeperiod=tp)
+                result_series.name = req.base_col_name
+                result_df = result_series.reset_index()
+                result_df.columns = ['date', req.base_col_name]
+                
+                df = df.merge(result_df, on='date', how='left')
+            
+            df = df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
 
         # -------------------------------------------------------
         # PHASE 1.3: STATIC CATEGORICAL DATA
