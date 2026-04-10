@@ -1078,8 +1078,26 @@ class FeatureEngine:
         if macro_derived_reqs:
             print(f"Phase 1.25: Computing {len(macro_derived_reqs)} Macro-Derived Features...")
             
-            # Build a single daily macro series from the main df
-            unique_dates = sorted(df['date'].unique())
+            # Auto-load source columns if not already present
+            for req in macro_derived_reqs:
+                source_col = FEATURE_REGISTRY[req.name]['source']
+                if source_col == 'VIX' and source_col not in df.columns:
+                    vix_raw = pd.read_csv("../Data/VIXCLS.csv")
+                    vix_raw = vix_raw.rename(columns={'observation_date': 'date', 'VIXCLS': 'VIX'})
+                    vix_raw['date'] = pd.to_datetime(vix_raw['date'])
+                    vix_raw['VIX'] = pd.to_numeric(vix_raw['VIX'], errors='coerce')
+                    vix_raw = vix_raw.sort_values('date').ffill()
+                    
+                    unique_dates = df['date'].unique()
+                    vix_macro_df = pd.DataFrame({'date': unique_dates}).sort_values('date').reset_index(drop=True)
+                    vix_macro_df['date'] = vix_macro_df['date'].dt.as_unit('us')
+                    vix_raw['date'] = vix_raw['date'].dt.as_unit('us')
+                    vix_macro_df = pd.merge_asof(vix_macro_df, vix_raw[['date', 'VIX']], on='date', direction='backward')
+                    
+                    df = df.merge(vix_macro_df, on='date', how='left')
+                    df = df.sort_values(['act_symbol', 'date']).reset_index(drop=True)
+                    del vix_raw, vix_macro_df
+                    gc.collect()
             
             for req in macro_derived_reqs:
                 config = FEATURE_REGISTRY[req.name]
