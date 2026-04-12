@@ -40,19 +40,27 @@ def _save_fold_artifacts(features, target, fold_folder):
     with open(os.path.join(fold_folder, 'target.pkl'), 'wb') as f:
         pickle.dump(target, f, pickle.HIGHEST_PROTOCOL)
 
+
 def run_walk_forward_analysis(universe_path, target, features, folder_path,
                               target_type="regression", train_years=4, 
-                              val_years=1, test_years=1, n_trials=40):
+                              val_years=1, test_years=1, n_trials=40,
+                              min_train_years=None):
     """
-    Performs a rolling Walk-Forward Analysis using the base Model class.
-    Saves all models, features, and metrics into a specified directory structure.
+    Walk-Forward Analysis with two modes:
     
-    Args:
-        folder_path: The parent directory where all models and metrics will be saved.
+    Sliding window (default, min_train_years=None):
+        Fixed training window slides forward each fold.
+        Fold 1: Train 2011-2014, Val 2015, Test 2016
+        Fold 2: Train 2012-2015, Val 2016, Test 2017
+        
+    Expanding window (min_train_years=int):
+        Training window grows each fold, anchored to data start.
+        Fold 1: Train 2011-2014, Val 2015, Test 2016
+        Fold 2: Train 2011-2015, Val 2016, Test 2017
+        Fold 3: Train 2011-2016, Val 2017, Test 2018
     """
-    # Create the parent directory
     os.makedirs(folder_path, exist_ok=True)
-    
+
     model = Model(universe_path)
     model.add_features(features, save=False)
     model.add_target(target, target_type=target_type, save=False)
@@ -61,41 +69,48 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
     global_start_year = model.data['date'].dt.year.min()
     global_end_year = model.data['date'].dt.year.max()
 
-    all_oos_predictions =[]
-    metrics_records =[]
-    
-    current_year = global_start_year
+    expanding = min_train_years is not None
+    if expanding:
+        print(f"Mode: EXPANDING WINDOW (min_train_years={min_train_years})")
+        current_year = global_start_year
+        first_val_year = global_start_year + min_train_years
+    else:
+        print(f"Mode: SLIDING WINDOW (train_years={train_years})")
+        current_year = global_start_year
+
+    all_oos_predictions = []
+    metrics_records = []
     fold = 1
 
-    '''
-    # 2. Instantiate a fresh model for this specific fold, passing the fold_folder
-    train_start = f"{current_year}-01-01"
-    val_start = f"{current_year + train_years}-01-01"
-    test_start = f"{current_year + train_years + val_years}-01-01"
-    test_end = f"{current_year + train_years + val_years + test_years}-01-01"
-    fold_folder = os.path.join(folder_path, f"fold_{test_start[:4]}_{test_end[:4]}")
-    model = Model(universe_path, model_folder=fold_folder)
-    '''
-
     while True:
-        # Define the chronological window boundaries
-        train_start = f"{current_year}-01-01"
-        val_start = f"{current_year + train_years}-01-01"
-        test_start = f"{current_year + train_years + val_years}-01-01"
-        test_end = f"{current_year + train_years + val_years + test_years}-01-01"
+        if expanding:
+            train_start = f"{global_start_year}-01-01"
+            val_start_year = first_val_year + (fold - 1) * test_years
+            val_start = f"{val_start_year}-01-01"
+            test_start_year = val_start_year + val_years
+            test_end_year = test_start_year + test_years
+            actual_train_years = val_start_year - global_start_year
+        else:
+            train_start = f"{current_year}-01-01"
+            val_start = f"{current_year + train_years}-01-01"
+            test_start_year = current_year + train_years + val_years
+            test_end_year = test_start_year + test_years
+            actual_train_years = train_years
 
-        # Break the loop if our test period pushes beyond our available data
-        if int(test_start[:4]) > global_end_year:
+        test_start = f"{test_start_year}-01-01"
+        test_end = f"{test_end_year}-01-01"
+
+        if test_start_year > global_end_year:
             break
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print(f"WALK-FORWARD FOLD {fold}")
-        print(f"Train : {train_start} to {val_start}")
-        print(f"Val   : {val_start} to {test_start}")
-        print(f"Test  : {test_start} to {test_end}")
-        print("="*60)
+        print(f"Train : {train_start} to {val_start} ({actual_train_years} years)")
+        print(f"Val   : {val_start} to {test_start} ({val_years} years)")
+        print(f"Test  : {test_start} to {test_end} ({test_years} years)")
+        print("=" * 60)
 
-        fold_folder = os.path.join(folder_path, f"fold_{test_start[:4]}_{test_end[:4]}")
+        fold_folder = os.path.join(folder_path, f"fold_{test_start_year}_{test_end_year}")
         os.makedirs(fold_folder, exist_ok=True)
         model.model_folder = fold_folder
         model.has_folder = True
@@ -105,30 +120,25 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
         model.params_tuned = False
         model.split_data_by_dates(train_start, val_start, test_start, test_end)
 
-        # 3. Split using the date-based method (this automatically saves dates.csv)
-        model.split_data_by_dates(train_start, val_start, test_start, test_end)
-
-        # If the test set ends up empty (e.g. data ends mid-year), skip it
         if model.test_df.empty:
-            st()
             print("Test set is empty. Ending Walk-Forward.")
             break
 
-        # 4. Tune and Train (this automatically calls test_model and saves model.txt)
         model.tune_params(n_trials=n_trials)
-        model.train_model(show_feature_importance = False)
+        model.train_model(show_feature_importance=False)
 
-        # 5. Extract Out-Of-Sample Predictions
         fold_oos_data = model.test_df.copy()
         all_oos_predictions.append(fold_oos_data)
-        
-        # 6. Extract Metrics for the Distribution Tracking
+
         fold_metrics = {
             "Fold": fold,
+            "Train_Start": train_start,
+            "Train_End": val_start,
+            "Train_Years": actual_train_years,
             "Test_Start": test_start,
-            "Test_End": test_end
+            "Test_End": test_end,
         }
-        
+
         if target_type == "classification":
             preds = fold_oos_data["prob_up"]
             y_true = model.y_test_bin
@@ -139,14 +149,11 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
             y_true = model.y_test_bin
             fold_metrics["RMSE"] = np.sqrt(mean_squared_error(y_true, preds))
             fold_metrics["Dir_Accuracy"] = ((y_true > 0) == (preds > 0)).mean()
-            
-            # Robust IC Metrics
+
             mean_ic, std_ic, ic_ir, ann_ic_ir, t_stat = model._calculate_robust_ic_metrics()
             fold_metrics["Mean_IC"] = mean_ic
             fold_metrics["Ann_IC_IR"] = ann_ic_ir
-            
-            # Quantile Sharpe Ratio
-            # We run it with plot=False to avoid drawing 10 charts during WFA
+
             spread_res = model.evaluate_quantile_spread(quantiles=10, plot=False)
             if spread_res is not None:
                 _, daily_spread = spread_res
@@ -163,47 +170,45 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
 
         metrics_records.append(fold_metrics)
 
-        # Move the sliding window forward
-        current_year += test_years
-        fold += 1
+        if expanding:
+            fold += 1
+        else:
+            current_year += test_years
+            fold += 1
 
-    print("\n" + "="*60)
-    print(f"WALK-FORWARD ANALYSIS COMPLETE ({fold-1} Folds)")
-    
-    # 7. Save the Metrics to the Parent Folder
+    print("\n" + "=" * 60)
+    print(f"WALK-FORWARD ANALYSIS COMPLETE ({fold - 1} Folds)")
+
     metrics_df = pd.DataFrame(metrics_records)
     metrics_csv_path = os.path.join(folder_path, "walk_forward_metrics.csv")
     metrics_df.to_csv(metrics_csv_path, index=False)
     print(f"Metrics saved to: {metrics_csv_path}")
-    
-    # 8. Plot and Save the Metric Distributions
+
     if target_type == "regression" and "Sharpe" in metrics_df.columns:
         fig, axes = plt.subplots(1, 3, figsize=(16, 4))
         metrics_df['Sharpe'].plot(kind='bar', ax=axes[0], color='purple', edgecolor='black')
         axes[0].set_title("OOS Sharpe Ratio per Fold")
         axes[0].set_xticklabels(metrics_df['Test_Start'].str[:4], rotation=45)
-        
+
         metrics_df['Mean_IC'].plot(kind='bar', ax=axes[1], color='blue', edgecolor='black')
         axes[1].set_title("Mean Rank IC per Fold")
         axes[1].set_xticklabels(metrics_df['Test_Start'].str[:4], rotation=45)
-        
+
         metrics_df['Ann_IC_IR'].plot(kind='bar', ax=axes[2], color='green', edgecolor='black')
         axes[2].set_title("Annualized IC-IR per Fold")
         axes[2].set_xticklabels(metrics_df['Test_Start'].str[:4], rotation=45)
-        
+
         plt.tight_layout()
         plot_path = os.path.join(folder_path, "metrics_distribution.png")
         plt.savefig(plot_path)
         print(f"Distribution plot saved to: {plot_path}")
         plt.show()
 
-    # 9. Combine all Out-Of-Sample periods into one continuous timeline
     if len(all_oos_predictions) > 0:
         final_oos_df = pd.concat(all_oos_predictions).sort_values(['date', 'act_symbol'])
         return final_oos_df, metrics_df
     else:
         return pd.DataFrame(), metrics_df
-
 
 #==================
 #CPCV Model
