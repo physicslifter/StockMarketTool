@@ -656,13 +656,6 @@ FEATURE_REGISTRY = {
     },
 
     'VIX_ZSCORE': {
-    'type': 'custom_stat',
-    'fn': calc_zscore,
-    'inputs': ['vix'],       # requires 'vix' column in your data
-    'outputs': ['real']
-    },
-
-    'VIX_ZSCORE': {
     'type': 'macro_derived',
     'source': 'VIX',
     'fn': calc_zscore,
