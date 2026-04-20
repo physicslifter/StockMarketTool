@@ -6,6 +6,10 @@ import os
 import pickle
 from clean_analysis import Model
 from matplotlib import pyplot as plt
+import numpy as np
+import optuna
+from scipy.stats import spearmanr
+from HRP import compute_hrp_weights
 
 def retrieve_model(model_folder):
     """gets model information from model folder
@@ -160,21 +164,18 @@ class WalkForwardPortfolio:
         return fold_dirs
 
     def _load_fold_models(self):
-        """
-        Load the lgb model, features, and target for every fold.
-        Raises immediately if any fold's feature set differs from fold 0 —
-        a mismatch means features cannot be computed once for all folds.
-        """
         fold_models = []
         for i, fold_info in enumerate(self.folds):
             lgb_model, info, _, features, target = retrieve_model(fold_info["model_folder"])
             fold_models.append({
-                "lgb_model": lgb_model,
-                "features":  features,
-                "target":    target,
-                "info":      info,
+                "lgb_model":     lgb_model,
+                "features":      features,
+                "target":        target,
+                "info":          info,
+                "universe_path": info.universe_path[0],
             })
 
+        # Validate feature set consistency across folds
         ref_names = [f.name for f in fold_models[0]["features"]]
         for i, fm in enumerate(fold_models[1:], start=1):
             fold_names = [f.name for f in fm["features"]]
@@ -186,18 +187,29 @@ class WalkForwardPortfolio:
                     f"Fold {i}: {fold_names}"
                 )
 
+        # Validate universe path consistency across folds
+        ref_universe = fold_models[0]["universe_path"]
+        for i, fm in enumerate(fold_models[1:], start=1):
+            if fm["universe_path"] != ref_universe:
+                raise Exception(
+                    f"Universe path mismatch between fold 0 and fold {i} — "
+                    f"cannot compute features once on a single dataset.\n"
+                    f"Fold 0 : {ref_universe}\n"
+                    f"Fold {i}: {fm['universe_path']}"
+                )
+
         print(f"  Feature set verified: {len(ref_names)} features consistent "
               f"across all {len(fold_models)} folds.")
+        print(f"  Universe path: '{ref_universe}'")
         return fold_models
 
-    def _compute_features(self, ohlcv_path, features, target):
+    def _compute_features(self, features, target, universe_path):
         """
-        Load the full OHLCV dataset and compute features and targets once.
-        No date slicing before feature computation — this is the entire point:
-        every row gets its full rolling lookback window.
+        Load the full universe dataset and compute features and targets once.
+        universe_path is pulled from the fold model info, exactly as Portfolio does.
         """
-        print(f"\nComputing features on full dataset: '{ohlcv_path}'...")
-        master = Model(universe_path=ohlcv_path)
+        print(f"\nComputing features on full dataset: '{universe_path}'...")
+        master = Model(universe_path=universe_path)
         master.add_features(features)
         master.add_target(target)
         master.generate_targets_and_features()
@@ -230,7 +242,7 @@ class WalkForwardPortfolio:
 
         # --- 3. Compute features once on full dataset ---------------------------
         full_data, feature_keys = self._compute_features(
-            ohlcv_path,
+            universe_path=fold_models[0]["universe_path"],
             features=fold_models[0]["features"],
             target=fold_models[0]["target"],
         )
@@ -458,8 +470,18 @@ class SimpleBacktest:
 
                 if len(df) >= n_l + n_s:
                     sorted_df = df.sort_values("pred_return", ascending=False)
+                    
+                    #==============================
+                    #Old ranking logic:
+                    #   Get top longs and shorts
                     longs = sorted_df.head(n_l)
                     shorts = sorted_df.tail(n_s)
+                    #==============================
+
+                    #==============================
+                    #New ranking logic:
+                    #   Keep stocks unless they drop out of the top 20
+                    #==============================
 
                     # Signal-weighted: proportional to |pred_zscore|
                     long_scores = longs["pred_zscore"].abs()
@@ -547,6 +569,8 @@ class SimpleBacktest:
         print(f"Calmar           : {calmar:.4f}")
         print(f"Win Rate         : {(dr > 0).mean():.2%}")
         print(f"Avg Turnover     : {self.results['turnover'].mean():.4f}")
+        print(f"Avg Daily Turnover: {avg_daily_turnover:.2%}")
+        print(f"Annual Turnover   : {ann_turnover:.2f}x (portfolio flipped this many times/yr)")
 
     def plot(self):
         if not hasattr(self, "results"):
@@ -620,7 +644,44 @@ class ManagedBacktest:
             ).fillna(0)
         self.pnl_col = "daily_open_ret"
 
+        # --- NEW: CALCULATE ROLLING BETA ---
+        print("Calculating 60-day rolling Beta against equal-weight universe...")
+        
+        # 1. Calculate daily universe return (our market proxy)
+        self.data['mkt_ret'] = self.data.groupby('date')[self.pnl_col].transform('mean')
+        
+        # 2. Market Variance
+        mkt_var = self.data.groupby('date')['mkt_ret'].first().rolling(60, min_periods=20).var()
+        self.data['mkt_var'] = self.data['date'].map(mkt_var)
+        
+        # 3. Asset Covariance (Fast vectorized calculation)
+        def rolling_cov(group):
+            return group[self.pnl_col].rolling(60, min_periods=20).cov(group['mkt_ret'])
+            
+        self.data['cov'] = self.data.groupby('act_symbol').apply(rolling_cov).reset_index(level=0, drop=True)
+        
+        # 4. Calculate Beta = Covariance / Variance
+        self.data['beta'] = (self.data['cov'] / self.data['mkt_var'])
+        
+        # 5. Clean up: fill NaNs with 1.0 (market neutral), and clip extremes
+        self.data['beta'] = self.data.groupby('act_symbol')['beta'].ffill().fillna(1.0).clip(0.1, 3.0)
+
         self.data = self.data.sort_values(["date", "pred_return"], ascending=[True, False])
+        '''
+        Smoothed predictionsxf
+        '''
+        self.data["smoothed_pred"] = self.data.groupby("act_symbol")["pred_return"].transform(
+            lambda x: x.ewm(span=3, min_periods=1).mean()
+        )
+
+        # Rolling prediction volatility per asset (signal stability)
+        self.data["pred_zscore_vol"] = self.data.groupby("act_symbol")["pred_zscore"].transform(
+            lambda x: x.rolling(20, min_periods=5).std()
+        ).fillna(self.data["pred_zscore"].std())
+        
+        # Sort by smoothed pred instead of raw pred
+        self.data = self.data.sort_values(["date", "smoothed_pred"], ascending=[True, False])
+        
         self.trading_dates = sorted(self.data["date"].unique())
         self._date_groups = {d: g for d, g in self.data.groupby("date")}
 
@@ -628,33 +689,38 @@ class ManagedBacktest:
               f"{self.data['act_symbol'].nunique()} stocks")
 
     def run(self,
+            rebalance_days=None,     # <--- NEW ARGUMENT ADDED HERE
             dd_threshold=-0.05,      
             dd_full_cut=-0.15,       
             target_vol=0.10,         
             vol_lookback=20,         
             vol_cap=1.5,             
             max_gross_exposure=2.0,  
-            dd_lookback=252          # Changed to 252 (1-year rolling high)
+            dd_lookback=252,
+            verbose:bool = True,
+            weight_by_prediction_volatility:bool = False          
             ):
         
-        n_l = self.n_longs
-        n_s = self.n_shorts
-        cost_rate = self.cost_bps / 10_000
-        tranche_wt = 1.0 / self.holding_period
+        # Default to the target holding period if no specific rebalance day is provided
+        if rebalance_days is None:
+            rebalance_days = self.holding_period
 
-        # Initialize empty tranches
-        tranches = {i: {} for i in range(self.holding_period)}
+        cost_rate = self.cost_bps / 10_000
+
+        # Single active portfolio dictionary
+        current_weights = {}
         
         daily_rets = []
         daily_scalars = []
+        daily_turnover = []
         daily_components = []
 
         cum_ret = 1.0
         cum_history = []
         recent_rets = []
 
-        # Default scalars
-        combined_scalar = 1.0
+        # Risk scalars
+        smoothed_scalar = 1.0 
         dd_scalar = 1.0
         vol_scalar = 1.0
         current_dd = 0.0
@@ -666,15 +732,9 @@ class ManagedBacktest:
             # =======================================================
             daily_port_gross_ret = 0.0
             
-            if date in self._date_groups:
+            if date in self._date_groups and current_weights:
                 rets = self._date_groups[date].set_index("act_symbol")[self.pnl_col]
-                
-                # Sum the returns of all active tranches
-                for i in range(self.holding_period):
-                    w = tranches[i]
-                    if w:
-                        tranche_ret = sum(weight * rets.get(sym, 0.0) for sym, weight in w.items())
-                        daily_port_gross_ret += tranche_ret * tranche_wt
+                daily_port_gross_ret = sum(w * rets.get(sym, 0.0) for sym, w in current_weights.items())
 
             # =======================================================
             # STEP 2: UPDATE RISK METRICS 
@@ -700,57 +760,110 @@ class ManagedBacktest:
                 if realized_vol > 0:
                     vol_scalar = min(vol_cap, target_vol / realized_vol)
             
-            combined_scalar = dd_scalar * vol_scalar
+            # EMA Smoothing of the risk scalar
+            raw_scalar = dd_scalar * vol_scalar
+            smoothed_scalar = (0.8 * smoothed_scalar) + (0.2 * raw_scalar)
 
             # =======================================================
-            # STEP 3: REBALANCE EXACTLY ONE TRANCHE FOR TOMORROW
+            # STEP 3: REBALANCE LOGIC (TRIGGERED EVERY N DAYS)
             # =======================================================
-            tranche_id = day_idx % self.holding_period
-            old_w = tranches[tranche_id]
-            new_w = {}
             turnover = 0.0
             
-            base_target_gross = 1.0 
-            
-            if date in self._date_groups:
+            # USE THE NEW REBALANCE_DAYS ARGUMENT HERE
+            if day_idx % rebalance_days == 0 and date in self._date_groups:
+                
                 df = self._date_groups[date]
+                current_universe_size = len(df)
+                new_w = {}
+                base_target_gross = 1.0 
+                
+                # --- Dynamic Sizing (Float = %, Int = Count) ---
+                if isinstance(self.n_longs, float) and 0.0 < self.n_longs < 1.0:
+                    n_l = max(1, int(current_universe_size * self.n_longs))
+                else:
+                    n_l = int(self.n_longs)
+                    
+                if isinstance(self.n_shorts, float) and 0.0 < self.n_shorts < 1.0:
+                    n_s = max(1, int(current_universe_size * self.n_shorts))
+                else:
+                    n_s = int(self.n_shorts)
 
-                if len(df) >= n_l + n_s:
-                    sorted_df = df.sort_values("pred_return", ascending=False)
-                    longs = sorted_df.head(n_l)
-                    shorts = sorted_df.tail(n_s)
+                if current_universe_size >= n_l + n_s:
+                    
+                    # 1. Identify what we ALREADY hold
+                    current_longs = [sym for sym, w in current_weights.items() if w > 0]
+                    current_shorts = [sym for sym, w in current_weights.items() if w < 0]
 
-                    long_scores = longs["pred_zscore"].abs()
-                    long_total = long_scores.sum()
-                    long_norm = long_scores / long_total if long_total > 0 else pd.Series(1.0 / n_l, index=long_scores.index)
+                    # 2. Rank all stocks today
+                    pred_col = "smoothed_pred" if "smoothed_pred" in df.columns else "pred_return"
+                    df['rank_long'] = df[pred_col].rank(ascending=False)
+                    df['rank_short'] = df[pred_col].rank(ascending=True)
 
-                    short_scores = shorts["pred_zscore"].abs()
-                    short_total = short_scores.sum()
-                    short_norm = short_scores / short_total if short_total > 0 else pd.Series(1.0 / n_s, index=short_scores.index)
+                    # 3. Hysteresis Buffer
+                    buffer_multiplier = 2.0 
+                    
+                    kept_longs = df[(df['act_symbol'].isin(current_longs)) & (df['rank_long'] <= n_l * buffer_multiplier)]
+                    needed_longs = max(0, n_l - len(kept_longs))
+                    new_longs = df[~df['act_symbol'].isin(current_longs)].sort_values('rank_long').head(needed_longs)
+                    longs = pd.concat([kept_longs, new_longs])
+
+                    kept_shorts = df[(df['act_symbol'].isin(current_shorts)) & (df['rank_short'] <= n_s * buffer_multiplier)]
+                    needed_shorts = max(0, n_s - len(kept_shorts))
+                    new_shorts = df[~df['act_symbol'].isin(current_shorts)].sort_values('rank_short').head(needed_shorts)
+                    shorts = pd.concat([kept_shorts, new_shorts])
+
+                    
+
+                    # --- LONGS ---
+                    if len(longs) > 0:
+                        long_scores = longs["pred_zscore"].abs()
+                        if weight_by_prediction_volatility:
+                            long_scores = long_scores / (longs["pred_zscore_vol"] + 1e-8)
+                        long_total = long_scores.sum()
+                        if long_total > 0:
+                            long_norm = long_scores / long_total
+                        else:
+                            long_norm = pd.Series(1.0 / len(longs), index=longs.index)
+                    else:
+                        long_norm = pd.Series(dtype=float)
+
+                    # --- SHORTS ---
+                    if len(shorts) > 0:
+                        short_scores = shorts["pred_zscore"].abs()
+                        if weight_by_prediction_volatility:
+                            short_scores = short_scores / (shorts["pred_zscore_vol"] + 1e-8)
+                        short_total = short_scores.sum()
+                        if short_total > 0:
+                            short_norm = short_scores / short_total
+                        else:
+                            short_norm = pd.Series(1.0 / len(shorts), index=shorts.index)
+                    else:
+                        short_norm = pd.Series(dtype=float)
+
+                    # --- APPLY WEIGHTS ---
+                    # If we only have longs, give them the full target gross. 
+                    # If we have both, split the capital evenly (Dollar Neutral).
+                    active_sides = (1 if len(longs) > 0 else 0) + (1 if len(shorts) > 0 else 0)
+                    side_allocation = base_target_gross / active_sides if active_sides > 0 else 0.0
 
                     for idx, r in longs.iterrows():
-                        new_w[r["act_symbol"]] = long_norm.loc[idx] * (base_target_gross / 2) * combined_scalar
+                        new_w[r["act_symbol"]] = long_norm.loc[idx] * side_allocation * smoothed_scalar
                     for idx, r in shorts.iterrows():
-                        new_w[r["act_symbol"]] = -short_norm.loc[idx] * (base_target_gross / 2) * combined_scalar
+                        new_w[r["act_symbol"]] = -short_norm.loc[idx] * side_allocation * smoothed_scalar
 
-                    gross = sum(abs(w) for w in new_w.values())
-                    if gross > max_gross_exposure:
-                        ratio = max_gross_exposure / gross
-                        new_w = {k: v * ratio for k, v in new_w.items()}
-
+                    # 5. Calculate Turnover
                     turnover = sum(
-                        abs(new_w.get(t, 0) - old_w.get(t, 0))
-                        for t in set(list(new_w) + list(old_w))
+                        abs(new_w.get(t, 0) - current_weights.get(t, 0))
+                        for t in set(list(new_w) + list(current_weights))
                     )
-            
-            # --- THE CRITICAL MISSING LINE ---
-            tranches[tranche_id] = new_w
-            # ---------------------------------
+                    
+                    # Update active portfolio
+                    current_weights = new_w
 
             # =======================================================
             # STEP 4: CALCULATE FINAL NET RETURN
             # =======================================================
-            port_cost = (turnover * cost_rate) * tranche_wt
+            port_cost = turnover * cost_rate 
             net_port_ret = daily_port_gross_ret - port_cost
             
             cum_ret = cum_ret * (1 + net_port_ret)
@@ -758,17 +871,15 @@ class ManagedBacktest:
             cum_history[-1] = cum_ret
             recent_rets[-1] = net_port_ret
 
-            total_gross = sum(
-                sum(abs(w) for w in tranches[i].values()) * tranche_wt 
-                for i in range(self.holding_period)
-            )
+            total_gross = sum(abs(w) for w in current_weights.values())
 
             daily_rets.append(net_port_ret)
-            daily_scalars.append(combined_scalar)
+            daily_scalars.append(smoothed_scalar)
+            daily_turnover.append(turnover) 
             daily_components.append({
                 "dd_scalar": dd_scalar,
                 "vol_scalar": vol_scalar,
-                "combined": combined_scalar,
+                "combined": smoothed_scalar,
                 "drawdown": current_dd,
                 "gross_exposure": total_gross,
             })
@@ -777,10 +888,27 @@ class ManagedBacktest:
             "date": self.trading_dates,
             "return": daily_rets,
             "scalar": daily_scalars,
+            "turnover": daily_turnover
         }).set_index("date")
 
         self.components = pd.DataFrame(daily_components, index=self.trading_dates)
-        self._print_results()
+        
+        # ── Compute daily Rank IC (prediction quality monitor) ──
+        daily_ic = []
+        for date in self.trading_dates:
+            if date in self._date_groups:
+                day = self._date_groups[date]
+                if len(day) > 10:
+                    ic, _ = spearmanr(day["pred_return"], day[self.pnl_col])
+                    daily_ic.append(ic if not np.isnan(ic) else 0.0)
+                else:
+                    daily_ic.append(0.0)
+            else:
+                daily_ic.append(0.0)
+        self.results["ic"] = daily_ic
+        
+        if verbose == True:
+            self._print_results()
         return self.results
 
     def _print_results(self):
@@ -803,6 +931,8 @@ class ManagedBacktest:
             max_dur = max(max_dur, current_dur)
 
         scalars = self.results["scalar"].values
+        avg_daily_turnover = self.results["turnover"].mean()
+        ann_turnover = avg_daily_turnover * 252
 
         print(f"\n{'='*50}")
         print(f"MANAGED BACKTEST RESULTS")
@@ -817,6 +947,8 @@ class ManagedBacktest:
         print(f"Avg Scalar       : {scalars.mean():.3f}")
         print(f"Min Scalar       : {scalars.min():.3f}")
         print(f"Days at <50%     : {(scalars < 0.5).sum()} ({(scalars < 0.5).mean():.1%})")
+        print(f"Avg Daily Turnover: {avg_daily_turnover:.2%}")
+        print(f"Annual Turnover   : {ann_turnover:.2f}x (portfolio flipped this many times/yr)")
 
     def plot(self):
         if not hasattr(self, "results"):
@@ -839,13 +971,27 @@ class ManagedBacktest:
         axes[0, 1].fill_between(dates, dd, 0, color="red", alpha=0.4)
         axes[0, 1].set_title("Drawdown")
 
-        # Rolling Sharpe
+        # Rolling Sharpe + Rolling IC (dual axis)
         rs = pd.Series(dr).rolling(60).apply(
             lambda x: x.mean() / (x.std() + 1e-8) * np.sqrt(252)
         )
-        axes[1, 0].plot(dates, rs.values, color="blue", lw=1)
+        axes[1, 0].plot(dates, rs.values, color="blue", lw=1, label="Sharpe")
         axes[1, 0].axhline(0, color="red", ls="--", lw=0.5)
-        axes[1, 0].set_title("Rolling 60-Day Sharpe")
+        axes[1, 0].set_ylabel("Sharpe", color="blue")
+        axes[1, 0].tick_params(axis="y", labelcolor="blue")
+
+        ax_ic = axes[1, 0].twinx()
+        rolling_ic = self.results["ic"].rolling(60).mean()
+        ax_ic.plot(dates, rolling_ic.values, color="green", lw=1, alpha=0.8, label="IC")
+        ax_ic.axhline(0, color="green", ls=":", lw=0.5, alpha=0.5)
+        ax_ic.set_ylabel("Rank IC", color="green")
+        ax_ic.tick_params(axis="y", labelcolor="green")
+
+        # Combined legend
+        lines1, labels1 = axes[1, 0].get_legend_handles_labels()
+        lines2, labels2 = ax_ic.get_legend_handles_labels()
+        axes[1, 0].legend(lines1 + lines2, labels1 + labels2, fontsize=8, loc="upper left")
+        axes[1, 0].set_title("Rolling 60-Day Sharpe & IC")
 
         # Monthly returns
         monthly = pd.Series(dr, index=dates).resample("ME").sum()
@@ -937,7 +1083,461 @@ class ManagedBacktest:
         plt.show()
     
 
-
-    
+class StrategyOptimizer:
+    def __init__(self, portfolio, strategy_class, param_func, start_date=None, end_date=None):
+        """
+        A flexible optimizer that works with ANY portfolio strategy.
         
+        Args:
+            portfolio: The Portfolio object containing the data.
+            strategy_class: The uninstantiated class of the strategy (e.g., ManagedBacktest).
+            param_func: A function that takes an Optuna 'trial' and returns a dictionary 
+                        of parameters to pass into the strategy's __init__ and run() methods.
+            start_date: Optional string (e.g. '2016-01-01') to isolate In-Sample data.
+            end_date: Optional string to isolate In-Sample data.
+        """
+        self.strategy_class = strategy_class
+        self.param_func = param_func
+        
+        # Create a dummy portfolio to safely slice data without modifying the original
+        class DummyPort: pass
+        self.eval_portfolio = DummyPort()
+        self.eval_portfolio.has_data = True
+        
+        mask = pd.Series(True, index=portfolio.data['date'].index) if type(portfolio.data.index) != pd.DatetimeIndex else pd.Series(True, index=portfolio.data.index)
+        
+        if start_date:
+            mask &= (portfolio.data['date'] >= pd.to_datetime(start_date))
+        if end_date:
+            mask &= (portfolio.data['date'] <= pd.to_datetime(end_date))
+            
+        self.eval_portfolio.data = portfolio.data[mask].copy()
 
+    def objective(self, trial):
+        # 1. Fetch the parameters for this specific trial from the user's custom function
+        params = self.param_func(trial)
+        init_kwargs = params.get("init_kwargs", {})
+        run_kwargs = params.get("run_kwargs", {})
+        
+        # Ensure the backtest runs silently during optimization
+        run_kwargs['verbose'] = False
+
+        # 2. Dynamically instantiate and run the strategy
+        try:
+            strategy = self.strategy_class(self.eval_portfolio, **init_kwargs)
+            results = strategy.run(**run_kwargs)
+        except Exception as e:
+            return -999.0  # Fail trial if parameters break the strategy
+
+        dr = results['return'].values
+        if len(dr) < 100 or np.std(dr) == 0:
+            return -999.0
+
+        # =================================================================
+        # 3. THE "ALL-WEATHER" OBJECTIVE FUNCTION
+        # =================================================================
+        
+        # Calculate Global Max Drawdown
+        cum = np.cumprod(1 + dr)
+        peak = np.maximum.accumulate(cum)
+        max_dd = abs(((cum - peak) / peak).min())
+
+        # Group returns by Year to ensure consistency across ALL time periods
+        df_res = results.copy()
+        df_res['year'] = df_res.index.year
+        
+        # Calculate the Sharpe Ratio for each individual year
+        def calc_annual_sharpe(x):
+            if x.std() == 0: return 0
+            return (x.mean() / x.std()) * np.sqrt(252)
+            
+        yearly_sharpes = df_res.groupby('year')['return'].apply(calc_annual_sharpe)
+        yearly_returns = df_res.groupby('year')['return'].sum()
+        
+        # Metrics
+        mean_yearly_sharpe = yearly_sharpes.mean()
+        min_yearly_sharpe = yearly_sharpes.min()
+        yearly_win_rate = (yearly_returns > 0).mean() # What % of years were profitable?
+        
+        # SCORE: Average Yearly Sharpe * Yearly Win Rate * (1 - Drawdown)
+        score = mean_yearly_sharpe * yearly_win_rate * (1 - max_dd)
+        
+        # SEVERE PENALTY: If ANY year has a deeply negative Sharpe, slash the score.
+        # This prevents the 2016-2021 flatline from hiding behind the 2024 massive run.
+        if min_yearly_sharpe < -0.5:
+            score *= 0.2
+            
+        return score
+
+    def optimize(self, n_trials=50):
+        # Suppress Optuna's heavy console logging
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        
+        study = optuna.create_study(direction="maximize")
+        print(f"Running flexible optimization for {n_trials} trials...")
+        study.optimize(self.objective, n_trials=n_trials, show_progress_bar=True)
+        
+        print("\n--- OPTIMIZATION COMPLETE ---")
+        print(f"Best Score: {study.best_value:.4f}")
+        print("Best Parameters:")
+        
+        # Reconstruct the optimal dictionary layout
+        best_params = self.param_func(optuna.trial.FixedTrial(study.best_params))
+        
+        for key, val in study.best_params.items():
+            print(f"  {key}: {val}")
+            
+        return best_params
+
+class HRPBacktest:
+    """
+    Long-short backtest using Hierarchical Risk Parity (HRP) for capital allocation.
+    Includes support for overlapping rolling tranches.
+    """
+
+    def __init__(self, portfolio, n_longs=20, n_shorts=20, holding_period=5, 
+                 rebalance_days=1, cost_bps=5.0, hrp_lookback=60, 
+                 smooth_predictions=False, buffer_multiplier=1.0):
+        
+        if not portfolio.has_data:
+            raise Exception("Portfolio has no data. Run get_model_data() first.")
+
+        self.data = portfolio.data.copy()
+        self.n_longs = n_longs
+        self.n_shorts = n_shorts
+        self.holding_period = holding_period
+        self.rebalance_days = rebalance_days
+        self.cost_bps = cost_bps
+        self.hrp_lookback = hrp_lookback
+        self.smooth_predictions = smooth_predictions
+        self.buffer_multiplier = buffer_multiplier
+
+        # Calculate Number of Tranches
+        self.num_tranches = max(1, int(self.holding_period / self.rebalance_days))
+
+        if "close" not in self.data.columns:
+            raise Exception("Portfolio data must contain 'close' column.")
+
+        # Compute close-to-close daily log returns
+        self.data = self.data.sort_values(["act_symbol", "date"])
+        self.data["daily_log_ret"] = self.data.groupby("act_symbol")["close"].transform(
+            lambda x: np.log(x / x.shift(1))
+        ).fillna(0)
+        self.pnl_col = "daily_log_ret"
+
+        # Create a fast pivot matrix of returns for HRP correlation calculations
+        self.returns_pivot = self.data.pivot_table(
+            index="date", columns="act_symbol", values=self.pnl_col
+        ).fillna(0)
+
+        # Apply optional smoothing
+        self.data = self.data.sort_values(["date", "pred_return"], ascending=[True, False])
+        if self.smooth_predictions:
+            self.data["final_pred"] = self.data.groupby("act_symbol")["pred_return"].transform(
+                lambda x: x.ewm(span=3, min_periods=1).mean()
+            )
+        else:
+            self.data["final_pred"] = self.data["pred_return"]
+        
+        # Sort by the final prediction column
+        self.data = self.data.sort_values(["date", "final_pred"], ascending=[True, False])
+        
+        self.trading_dates = sorted(self.data["date"].unique())
+        self._date_groups = {d: g for d, g in self.data.groupby("date")}
+
+        print(f"HRPBacktest: {len(self.trading_dates)} days, {self.data['act_symbol'].nunique()} stocks")
+        print(f"Smoothing: {self.smooth_predictions} | Hysteresis Buffer: {self.buffer_multiplier}")
+        print(f"Tranches: {self.num_tranches} (Hold: {self.holding_period}d, Rebalance every: {self.rebalance_days}d)")
+
+    def run(self, verbose=True):
+        cost_rate = self.cost_bps / 10_000
+        
+        # --- TRANCHE TRACKING ---
+        # Instead of one portfolio weight dictionary, we hold a list of independent dictionaries.
+        # Total portfolio weights will be the sum of all active tranches.
+        tranches = [{} for _ in range(self.num_tranches)]
+        current_weights = {}
+        
+        daily_rets = []
+        daily_turnover = []
+        daily_components = []
+        hrp_stats = []
+
+        # Forward-fill variables for charts
+        active_eff_n_long = 0
+        active_eff_n_short = 0
+        active_max_w_long = 0
+        active_max_w_short = 0
+
+        for day_idx, date in enumerate(self.trading_dates):
+            
+            # 1. Gross P&L using aggregate weights from yesterday
+            daily_port_gross_ret = 0.0
+            if date in self._date_groups and current_weights:
+                rets = self._date_groups[date].set_index("act_symbol")[self.pnl_col]
+                daily_port_gross_ret = sum(w * rets.get(sym, 0.0) for sym, w in current_weights.items())
+
+            # 2. Rebalance Logic
+            turnover = 0.0
+            
+            if day_idx % self.rebalance_days == 0 and date in self._date_groups:
+                
+                # Determine which tranche is up for rotation today
+                tranche_idx = (day_idx // self.rebalance_days) % self.num_tranches
+                
+                df = self._date_groups[date]
+                current_universe_size = len(df)
+                new_tranche_w = {}
+                base_target_gross = 1.0 
+                
+                # Dynamic Sizing
+                n_l = max(1, int(current_universe_size * self.n_longs)) if isinstance(self.n_longs, float) and 0.0 < self.n_longs < 1.0 else int(self.n_longs)
+                n_s = max(1, int(current_universe_size * self.n_shorts)) if isinstance(self.n_shorts, float) and 0.0 < self.n_shorts < 1.0 else int(self.n_shorts)
+
+                if current_universe_size >= n_l + n_s:
+                    
+                    # For hysteresis, we look at what the ENTIRE portfolio currently holds, 
+                    # not just this single tranche. This keeps overlapping tranches aligned.
+                    current_longs = [sym for sym, w in current_weights.items() if w > 0]
+                    current_shorts = [sym for sym, w in current_weights.items() if w < 0]
+
+                    # Rank
+                    df['rank_long'] = df["final_pred"].rank(ascending=False)
+                    df['rank_short'] = df["final_pred"].rank(ascending=True)
+                    
+                    kept_longs = df[(df['act_symbol'].isin(current_longs)) & (df['rank_long'] <= n_l * self.buffer_multiplier)]
+                    needed_longs = max(0, n_l - len(kept_longs))
+                    new_longs = df[~df['act_symbol'].isin(current_longs)].sort_values('rank_long').head(needed_longs)
+                    longs = pd.concat([kept_longs, new_longs])
+
+                    kept_shorts = df[(df['act_symbol'].isin(current_shorts)) & (df['rank_short'] <= n_s * self.buffer_multiplier)]
+                    needed_shorts = max(0, n_s - len(kept_shorts))
+                    new_shorts = df[~df['act_symbol'].isin(current_shorts)].sort_values('rank_short').head(needed_shorts)
+                    shorts = pd.concat([kept_shorts, new_shorts])
+
+                    # -------------------------------------------------------------
+                    # APPLY HIERARCHICAL RISK PARITY (HRP)
+                    # -------------------------------------------------------------
+                    current_date_idx = self.returns_pivot.index.get_loc(date)
+                    start_idx = max(0, current_date_idx - self.hrp_lookback)
+                    past_returns = self.returns_pivot.iloc[start_idx:current_date_idx]
+
+                    def get_safe_hrp_weights(symbols):
+                        if len(symbols) == 0:
+                            return {}, 0.0, 0.0
+                        
+                        rets = past_returns[symbols]
+                        raw_weights = compute_hrp_weights(rets, linkage_method="single")
+                        
+                        # Handle dropped stocks (give them exactly half of the minimum allocated weight)
+                        dropped_symbols = [s for s in symbols if s not in raw_weights]
+                        if dropped_symbols:
+                            if len(raw_weights) > 0:
+                                min_w = min(raw_weights.values())
+                                fallback_w = min_w / 2.0  
+                            else:
+                                fallback_w = 1.0 / len(symbols)
+                                
+                            for sym in dropped_symbols:
+                                raw_weights[sym] = fallback_w
+                        
+                        # Normalize to 1.0
+                        total = sum(raw_weights.values())
+                        final_w = {k: v / total for k, v in raw_weights.items() if total > 0}
+                            
+                        # Diagnostics
+                        w_array = np.array(list(final_w.values()))
+                        eff_n = 1.0 / np.sum(w_array**2) if len(w_array) > 0 else 0
+                        max_w = np.max(w_array) if len(w_array) > 0 else 0
+                        
+                        return final_w, eff_n, max_w
+
+                    long_weights, active_eff_n_long, active_max_w_long = get_safe_hrp_weights(longs["act_symbol"].tolist())
+                    short_weights, active_eff_n_short, active_max_w_short = get_safe_hrp_weights(shorts["act_symbol"].tolist())
+
+                    # --- Market Neutral Sizing with 150% Margin & Tranches ---
+                    # To be perfectly dollar/market neutral, Exposure_Long must == Exposure_Short.
+                    # Buying Power Used = Exposure_Long*(1.0) + Exposure_Short*(1.5).
+                    # If BP_Used = 1.0, then Base Exposure = 1.0 / 2.5 = 0.4.
+                    active_sides = (1 if len(long_weights) > 0 else 0) + (1 if len(short_weights) > 0 else 0)
+                    if active_sides == 2:
+                        base_side_exposure = base_target_gross / 2.5
+                    elif active_sides == 1:
+                        base_side_exposure = base_target_gross if len(long_weights) > 0 else base_target_gross / 1.5
+                    else:
+                        base_side_exposure = 0.0
+
+                    # SCALE DOWN BY TRANCHE: Each tranche only gets 1/N of the exposure
+                    tranche_side_exposure = base_side_exposure / self.num_tranches
+
+                    for sym, w in long_weights.items():
+                        new_tranche_w[sym] = w * tranche_side_exposure
+                    for sym, w in short_weights.items():
+                        new_tranche_w[sym] = -w * tranche_side_exposure
+
+                # Overwrite only the specific tranche rotating today
+                tranches[tranche_idx] = new_tranche_w
+                
+                # Re-aggregate the total portfolio weights from all active tranches
+                new_total_w = {}
+                for t in tranches:
+                    for sym, w in t.items():
+                        new_total_w[sym] = new_total_w.get(sym, 0.0) + w
+
+                # Turnover is the difference between the old aggregate and the new aggregate
+                turnover = sum(
+                    abs(new_total_w.get(t, 0) - current_weights.get(t, 0))
+                    for t in set(list(new_total_w) + list(current_weights))
+                )
+                
+                current_weights = new_total_w
+
+            # 3. Final Net Return
+            port_cost = turnover * cost_rate 
+            net_port_ret = daily_port_gross_ret - port_cost
+            total_gross = sum(abs(w) for w in current_weights.values())
+
+            daily_rets.append(net_port_ret)
+            daily_turnover.append(turnover) 
+            daily_components.append({"gross_exposure": total_gross})
+            
+            hrp_stats.append({
+                "eff_n_long": active_eff_n_long,
+                "eff_n_short": active_eff_n_short,
+                "max_w_long": active_max_w_long,
+                "max_w_short": active_max_w_short
+            })
+
+        self.results = pd.DataFrame({
+            "date": self.trading_dates,
+            "return": daily_rets,
+            "turnover": daily_turnover
+        }).set_index("date")
+
+        self.components = pd.DataFrame(daily_components, index=self.trading_dates)
+        self.hrp_stats = pd.DataFrame(hrp_stats, index=self.trading_dates)
+        
+        # Compute daily Rank IC
+        daily_ic = []
+        for date in self.trading_dates:
+            if date in self._date_groups:
+                day = self._date_groups[date]
+                if len(day) > 10:
+                    ic, _ = spearmanr(day["final_pred"], day[self.pnl_col])
+                    daily_ic.append(ic if not np.isnan(ic) else 0.0)
+                else:
+                    daily_ic.append(0.0)
+            else:
+                daily_ic.append(0.0)
+        self.results["ic"] = daily_ic
+        
+        if verbose:
+            self._print_results()
+        return self.results
+
+    def _print_results(self):
+        dr = self.results["return"].values
+        if len(dr) == 0 or np.std(dr) == 0:
+            print("No valid returns.")
+            return
+
+        cum = np.cumprod(1 + dr)
+        peak = np.maximum.accumulate(cum)
+        max_dd = ((cum - peak) / peak).min()
+        sharpe = (dr.mean() / dr.std(ddof=1)) * np.sqrt(252)
+        ann_ret = dr.mean() * 252
+        calmar = ann_ret / abs(max_dd) if max_dd != 0 else 0
+
+        current_dur = 0
+        max_dur = 0
+        for uw in cum < peak:
+            current_dur = current_dur + 1 if uw else 0
+            max_dur = max(max_dur, current_dur)
+
+        avg_daily_turnover = self.results["turnover"].mean()
+        ann_turnover = avg_daily_turnover * 252
+
+        print(f"\n{'='*50}")
+        print(f"HRP TRANCHE BACKTEST RESULTS")
+        print(f"{'='*50}")
+        print(f"Sharpe           : {sharpe:.4f}")
+        print(f"Annual Return    : {ann_ret:.2%}")
+        print(f"Total Return     : {cum[-1] - 1:.2%}")
+        print(f"Max Drawdown     : {max_dd:.2%}")
+        print(f"Max DD Duration  : {max_dur} days")
+        print(f"Calmar           : {calmar:.4f}")
+        print(f"Win Rate         : {(dr > 0).mean():.2%}")
+        print(f"Avg Daily Turnover: {avg_daily_turnover:.2%}")
+        print(f"Annual Turnover   : {ann_turnover:.2f}x")
+        print(f"Avg Eff. N Longs  : {self.hrp_stats['eff_n_long'].mean():.1f} (Target: {self.n_longs})")
+        print(f"Avg Max Wt Long   : {self.hrp_stats['max_w_long'].mean():.2%}")
+
+    def plot(self):
+        if not hasattr(self, "results"):
+            raise Exception("Run run() first.")
+
+        dr = self.results["return"].values
+        dates = self.results.index
+
+        fig, axes = plt.subplots(3, 3, figsize=(18, 12))
+
+        # --- Row 1 ---
+        cum = np.cumprod(1 + dr)
+        axes[0, 0].plot(dates, cum, color="purple", lw=1.5)
+        axes[0, 0].axhline(1, color="black", lw=0.5)
+        axes[0, 0].set_title("Cumulative Return")
+
+        peak = np.maximum.accumulate(cum)
+        dd = (cum - peak) / peak
+        axes[0, 1].fill_between(dates, dd, 0, color="red", alpha=0.4)
+        axes[0, 1].set_title("Drawdown")
+
+        axes[0, 2].plot(dates, self.hrp_stats["eff_n_long"], color="blue", lw=1, alpha=0.8, label="Eff. N (Longs)")
+        axes[0, 2].plot(dates, self.hrp_stats["eff_n_short"], color="red", lw=1, alpha=0.8, label="Eff. N (Shorts)")
+        axes[0, 2].axhline(self.n_longs, color="gray", ls="--", lw=1, label="Target N")
+        axes[0, 2].set_title("HRP Diversification (Effective N)")
+        axes[0, 2].legend(loc="lower right")
+
+        # --- Row 2 ---
+        rs = pd.Series(dr).rolling(60).apply(
+            lambda x: x.mean() / (x.std() + 1e-8) * np.sqrt(252)
+        )
+        axes[1, 0].plot(dates, rs.values, color="blue", lw=1, label="Sharpe")
+        axes[1, 0].axhline(0, color="red", ls="--", lw=0.5)
+        axes[1, 0].set_ylabel("Sharpe", color="blue")
+        axes[1, 0].tick_params(axis="y", labelcolor="blue")
+
+        ax_ic = axes[1, 0].twinx()
+        rolling_ic = self.results["ic"].rolling(60).mean()
+        ax_ic.plot(dates, rolling_ic.values, color="green", lw=1, alpha=0.8, label="IC")
+        ax_ic.axhline(0, color="green", ls=":", lw=0.5, alpha=0.5)
+        ax_ic.set_ylabel("Rank IC", color="green")
+        ax_ic.tick_params(axis="y", labelcolor="green")
+        axes[1, 0].set_title("Rolling 60-Day Sharpe & IC")
+
+        monthly = pd.Series(dr, index=dates).resample("ME").sum()
+        axes[1, 1].bar(
+            range(len(monthly)), monthly.values,
+            color=["green" if r > 0 else "red" for r in monthly], alpha=0.7,
+        )
+        axes[1, 1].set_title("Monthly Returns")
+        axes[1, 1].set_xticks([])
+
+        axes[1, 2].plot(dates, self.hrp_stats["max_w_long"] * 100, color="blue", lw=1, alpha=0.8, label="Max Long Wt %")
+        axes[1, 2].plot(dates, self.hrp_stats["max_w_short"] * 100, color="red", lw=1, alpha=0.8, label="Max Short Wt %")
+        axes[1, 2].axhline((1/self.n_longs)*100, color="gray", ls="--", lw=1, label="Eq. Wt Base %")
+        axes[1, 2].set_title("HRP Concentration (Max Single Position %)")
+        axes[1, 2].legend(loc="upper right")
+
+        # --- Row 3 ---
+        axes[2, 0].plot(dates, self.components["gross_exposure"], color="darkorange", lw=1)
+        axes[2, 0].set_title("Gross Exposure (Dollar Base)")
+        axes[2, 0].set_ylim(0, 1.2)
+
+        axes[2, 1].plot(dates, self.results["turnover"], color="purple", lw=1, alpha=0.5)
+        axes[2, 1].set_title("Daily Turnover")
+        
+        axes[2, 2].axis("off")
+
+        plt.tight_layout()
+        plt.show()
