@@ -23,6 +23,7 @@ def retrieve_model(model_folder):
     Returns:
         tuple: info for the model
     """
+    print(model_folder)
     lgb_model = lgb.Booster(model_file = f"{model_folder}/model.txt")
     info = pd.read_csv(f"{model_folder}/info.csv")
     dates = pd.read_csv(f"{model_folder}/dates.csv")
@@ -89,19 +90,42 @@ class Portfolio:
               f"{self.model.data['act_symbol'].nunique()} stocks, "
               f"{self.model.data['date'].min().date()} -> {self.model.data['date'].max().date()}")
         
-    def drop_unnecessary(self):
-        # Compute actual forward log returns for P&L BEFORE dropping columns
-        self.model.data["daily_log_ret"] = self.model.data.groupby("act_symbol")["close"].transform(
+    def drop_unnecessary(self, ohlcv_path="../Data/all_ohlcv.feather"):
+        """
+        Drops everything except essential columns. Computes clean open-to-open
+        daily log returns from the full contiguous OHLCV dataset to avoid
+        gap-induced return errors.
+        """
+        # Get the stocks and date range we need returns for
+        symbols = self.model.data["act_symbol"].unique().tolist()
+        min_date = self.model.data["date"].min() - pd.Timedelta(days=10)
+        max_date = self.model.data["date"].max()
+
+        # Load only what we need from the full OHLCV
+        ohlcv = pd.read_feather(ohlcv_path)
+        ohlcv["date"] = pd.to_datetime(ohlcv["date"])
+        ohlcv = ohlcv[
+            (ohlcv["act_symbol"].isin(symbols)) &
+            (ohlcv["date"] >= min_date) &
+            (ohlcv["date"] <= max_date)
+        ].sort_values(["act_symbol", "date"])
+
+        # Compute clean open-to-open log returns from contiguous data
+        ohlcv["daily_log_ret"] = ohlcv.groupby("act_symbol")["open"].transform(
             lambda x: np.log(x / x.shift(1))
+        ).fillna(0)
+
+        # Merge onto portfolio data
+        self.model.data = self.model.data.merge(
+            ohlcv[["date", "act_symbol", "daily_log_ret"]],
+            on=["date", "act_symbol"],
+            how="left",
         )
+        self.model.data["daily_log_ret"] = self.model.data["daily_log_ret"].fillna(0)
 
-        keep_cols = ["date", "act_symbol", "pred_return", "pred_zscore", "fwd_log_ret"]
+        keep_cols = ["date", "act_symbol", "pred_return", "pred_zscore", 
+                     "daily_log_ret", "open", "close"]
 
-        for col in ["open", "close"]:
-            if col in self.model.data.columns:
-                keep_cols.append(col)
-
-        # Still keep target for reference, but NOT for P&L
         target_cols = [k for k in self.model.data.columns if "T" in k.split("_")]
         keep_cols += target_cols
 
@@ -270,7 +294,14 @@ class WalkForwardPortfolio:
                     f"Check that ohlcv_path covers this date range."
                 )
 
-            fold_data["pred_return"] = fm["lgb_model"].predict(fold_data[feature_keys])
+            #fold_data["pred_return"] = fm["lgb_model"].predict(fold_data[feature_keys])
+            
+            # Ask the LightGBM model exactly which features it was trained on
+            trained_features = fm["lgb_model"].feature_name()
+            
+            # Predict using only that exact subset of columns
+            fold_data["pred_return"] = fm["lgb_model"].predict(fold_data[trained_features])
+
             fold_data["pred_zscore"] = fold_data.groupby("date")["pred_return"].transform(
                 lambda x: (x - x.mean()) / (x.std() + 1e-8)
             )
@@ -302,6 +333,34 @@ class WalkForwardPortfolio:
                      .sort_values(["date", "act_symbol"])
                      .reset_index(drop=True))
         self.has_data = True
+
+        # --- 6. Compute clean open-to-open returns from contiguous OHLCV ------
+        print("Computing clean open-to-open returns from full OHLCV...")
+        symbols = self.data["act_symbol"].unique().tolist()
+        min_date = self.data["date"].min() - pd.Timedelta(days=10)
+        max_date = self.data["date"].max()
+
+        ohlcv = pd.read_feather(ohlcv_path)
+        ohlcv["date"] = pd.to_datetime(ohlcv["date"])
+        ohlcv = ohlcv[
+            (ohlcv["act_symbol"].isin(symbols)) &
+            (ohlcv["date"] >= min_date) &
+            (ohlcv["date"] <= max_date)
+        ].sort_values(["act_symbol", "date"])
+
+        ohlcv["daily_log_ret"] = ohlcv.groupby("act_symbol")["open"].transform(
+            lambda x: np.log(x / x.shift(1))
+        ).fillna(0)
+
+        self.data = self.data.merge(
+            ohlcv[["date", "act_symbol", "daily_log_ret"]],
+            on=["date", "act_symbol"],
+            how="left",
+        )
+        self.data["daily_log_ret"] = self.data["daily_log_ret"].fillna(0)
+
+        print(f"  Returns computed: {(self.data['daily_log_ret'] != 0).sum()} "
+              f"non-zero out of {len(self.data)} rows")
 
         print(f"\nWalkForwardPortfolio ready: "
               f"{self.data['date'].nunique()} dates | "
@@ -431,14 +490,6 @@ class SimpleBacktest:
         self.cost_bps = cost_bps
         self.holding_period = holding_period
 
-        # Compute daily log returns from close prices
-        if "close" not in self.data.columns:
-            raise Exception("Portfolio data must contain 'close' column. Don't drop it in drop_unnecessary().")
-    
-        self.data = self.data.sort_values(["act_symbol", "date"])
-        self.data["daily_log_ret"] = self.data.groupby("act_symbol")["close"].transform(
-            lambda x: np.log(x / x.shift(1))
-        )
         self.pnl_col = "daily_log_ret"
         self.data["daily_log_ret"] = self.data["daily_log_ret"].fillna(0)
 
@@ -632,17 +683,7 @@ class ManagedBacktest:
         self.holding_period = holding_period
         self.cost_bps = cost_bps
 
-        if "close" not in self.data.columns:
-            raise Exception("Portfolio data must contain 'close' column.")
-
-        # Compute daily log returns
-        self.data = self.data.sort_values(["act_symbol", "date"])
-        # Compute open-to-open returns instead
-        self.data = self.data.sort_values(["act_symbol", "date"])
-        self.data["daily_open_ret"] = self.data.groupby("act_symbol")["open"].transform(
-            lambda x: np.log(x / x.shift(1))
-            ).fillna(0)
-        self.pnl_col = "daily_open_ret"
+        self.pnl_col = "daily_log_ret"
 
         # --- NEW: CALCULATE ROLLING BETA ---
         print("Calculating 60-day rolling Beta against equal-weight universe...")
@@ -1189,15 +1230,21 @@ class StrategyOptimizer:
             
         return best_params
 
+import numpy as np
+import pandas as pd
+from matplotlib import pyplot as plt
+from scipy.stats import spearmanr
+from HRP import compute_hrp_weights
+
 class HRPBacktest:
     """
-    Long-short backtest using Hierarchical Risk Parity (HRP) for capital allocation.
-    Includes support for overlapping rolling tranches.
+    Ledger-Based Long-Short backtest using Hierarchical Risk Parity (HRP).
+    Tracks exact cash, shares, and Mark-to-Market value to ensure flawless math.
     """
 
     def __init__(self, portfolio, n_longs=20, n_shorts=20, holding_period=5, 
                  rebalance_days=1, cost_bps=5.0, hrp_lookback=60, 
-                 smooth_predictions=False, buffer_multiplier=1.0):
+                 smooth_predictions=False, buffer_multiplier=1.0, initial_capital=2000.0):
         
         if not portfolio.has_data:
             raise Exception("Portfolio has no data. Run get_model_data() first.")
@@ -1211,97 +1258,171 @@ class HRPBacktest:
         self.hrp_lookback = hrp_lookback
         self.smooth_predictions = smooth_predictions
         self.buffer_multiplier = buffer_multiplier
+        self.initial_capital = initial_capital
 
-        # Calculate Number of Tranches
         self.num_tranches = max(1, int(self.holding_period / self.rebalance_days))
 
         if "close" not in self.data.columns:
             raise Exception("Portfolio data must contain 'close' column.")
 
-        # Compute close-to-close daily log returns
-        self.data = self.data.sort_values(["act_symbol", "date"])
-        self.data["daily_log_ret"] = self.data.groupby("act_symbol")["close"].transform(
-            lambda x: np.log(x / x.shift(1))
-        ).fillna(0)
-        self.pnl_col = "daily_log_ret"
+        self.data = self.data.sort_values(["date", "act_symbol"])
+        
+        # Build a master Price History table. 
+        # ffill() ensures if a stock halts or drops from the universe, we can still value existing shares.
+        self.price_history = self.data.pivot_table(
+            index="date", columns="act_symbol", values="close"
+        ).ffill()
 
-        # Create a fast pivot matrix of returns for HRP correlation calculations
-        self.returns_pivot = self.data.pivot_table(
-            index="date", columns="act_symbol", values=self.pnl_col
-        ).fillna(0)
+        # Pre-compute a clean returns matrix purely for the HRP correlation algorithm
+        self.returns_pivot = self.price_history.pct_change().clip(lower=-0.75, upper=1.0).fillna(0)
 
         # Apply optional smoothing
-        self.data = self.data.sort_values(["date", "pred_return"], ascending=[True, False])
         if self.smooth_predictions:
+            self.data = self.data.sort_values(["act_symbol", "date"])
             self.data["final_pred"] = self.data.groupby("act_symbol")["pred_return"].transform(
                 lambda x: x.ewm(span=3, min_periods=1).mean()
             )
         else:
             self.data["final_pred"] = self.data["pred_return"]
         
-        # Sort by the final prediction column
         self.data = self.data.sort_values(["date", "final_pred"], ascending=[True, False])
-        
         self.trading_dates = sorted(self.data["date"].unique())
         self._date_groups = {d: g for d, g in self.data.groupby("date")}
 
-        print(f"HRPBacktest: {len(self.trading_dates)} days, {self.data['act_symbol'].nunique()} stocks")
-        print(f"Smoothing: {self.smooth_predictions} | Hysteresis Buffer: {self.buffer_multiplier}")
-        print(f"Tranches: {self.num_tranches} (Hold: {self.holding_period}d, Rebalance every: {self.rebalance_days}d)")
+        print(f"Ledger-Based HRPBacktest Initialized.")
+        print(f"Tranches: {self.num_tranches} | Starting Capital: ${self.initial_capital:,.2f}")
 
     def run(self, verbose=True):
         cost_rate = self.cost_bps / 10_000
         
-        # --- TRANCHE TRACKING ---
-        # Instead of one portfolio weight dictionary, we hold a list of independent dictionaries.
-        # Total portfolio weights will be the sum of all active tranches.
-        tranches = [{} for _ in range(self.num_tranches)]
-        current_weights = {}
+        # Initialize sub-accounts for each tranche
+        self.tranches = []
+        for _ in range(self.num_tranches):
+            self.tranches.append({
+                'cash': self.initial_capital / self.num_tranches,
+                'shares': {}
+            })
         
         daily_rets = []
-        daily_turnover = []
+        daily_turnover_pct = []
         daily_components = []
         hrp_stats = []
 
-        # Forward-fill variables for charts
-        active_eff_n_long = 0
-        active_eff_n_short = 0
-        active_max_w_long = 0
-        active_max_w_short = 0
+        active_eff_n_long, active_eff_n_short = 0, 0
+        active_max_w_long, active_max_w_short = 0, 0
+        
+        prev_total_nav = self.initial_capital
+
+        # --- NEW: Tracking variables for Scaling ---
+        peak_nav = self.initial_capital
+        daily_scalars = []
+        if not hasattr(self, 'use_dynamic_scaling'):
+            self.use_dynamic_scaling = False
 
         for day_idx, date in enumerate(self.trading_dates):
             
-            # 1. Gross P&L using aggregate weights from yesterday
-            daily_port_gross_ret = 0.0
-            if date in self._date_groups and current_weights:
-                rets = self._date_groups[date].set_index("act_symbol")[self.pnl_col]
-                daily_port_gross_ret = sum(w * rets.get(sym, 0.0) for sym, w in current_weights.items())
+            # Fast lookup for today's closing prices for every stock ever traded
+            today_prices = self.price_history.loc[date]
 
-            # 2. Rebalance Logic
-            turnover = 0.0
+            # =========================================================
+            # STEP 1: MARK-TO-MARKET PORTFOLIO VALUATION
+            # =========================================================
+            tranche_navs = []
+            for t in self.tranches:
+                # Value = Cash + sum(shares * price)
+                # (For shorts, shares are negative, so price gains reduce NAV, as they should)
+                nav = t['cash']
+                for sym, shares in t['shares'].items():
+                    nav += shares * today_prices[sym]
+                tranche_navs.append(nav)
+                
+            total_nav = sum(tranche_navs)
+
+            # --- NEW: DYNAMIC SCALING LOGIC ---
+            # =========================================================
+            # STEP 2: I IF APPLICABLE, IMPLEMENT DYNAMIC 
+            # =========================================================
+            active_scalar = 1.0
+            
+            # Update peak NAV and current drawdown
+            """
+            Old, using total NAV
+            if total_nav > peak_nav:
+                peak_nav = total_nav
+            current_dd = (total_nav / peak_nav) - 1.0"""
+
+            #new, using rolling NAV
+            if not hasattr(self, 'nav_history'):
+                self.nav_history = []
+            self.nav_history.append(total_nav)
+            
+            # Use a 252-day rolling peak (1 year)
+            rolling_peak = max(self.nav_history[-252:]) 
+            current_dd = (total_nav / rolling_peak) - 1.0 if rolling_peak > 0 else 0.0
+            
+            if self.use_dynamic_scaling and day_idx > max(self.vol_lookback, self.conviction_lookback):
+                
+                # 1. DRAWDOWN CONTROL (Step-Function)
+                if current_dd <= self.dd_kill_threshold:
+                    dd_scalar = 0.0  # Kill switch
+                elif current_dd <= self.dd_warning_threshold:
+                    dd_scalar = self.dd_penalty  # Penalty cut
+                else:
+                    dd_scalar = 1.0
+                
+                # 2. VOLATILITY SCALING
+                # Use daily_rets list (which contains up to yesterday's return)
+                recent_rets = daily_rets[-self.vol_lookback:]
+                realized_vol = np.std(recent_rets) * np.sqrt(252)
+                
+                if realized_vol > 0:
+                    vol_scalar = self.target_vol / realized_vol
+                    vol_scalar = min(self.max_vol_leverage, vol_scalar) # Cap leverage
+                else:
+                    vol_scalar = 1.0
+                    
+                # 3. CONVICTION SCALING (Kelly Proxy: Rolling Hit Rate)
+                # If the model has been losing consistently for 20 days, scale down smoothly.
+                conviction_scalar = 1.0
+                if self.use_conviction_scaling:
+                    win_rate = sum(1 for r in recent_rets[-self.conviction_lookback:] if r > 0) / self.conviction_lookback
+                    # If win rate drops below 40%, start linearly scaling down exposure
+                    if win_rate < 0.40:
+                        conviction_scalar = max(0.0, win_rate / 0.40)
+                        
+                # 4. APPLY THE MOST RESTRICTIVE SCALAR (The Min Function)
+                active_scalar = min(dd_scalar, vol_scalar, conviction_scalar)
+                
+            daily_scalars.append(active_scalar)
+            # --- END DYNAMIC SCALING LOGIC ---
+
+            # =========================================================
+            # STEP 2: REBALANCE ACTIVE TRANCHE
+            # =========================================================
+            turnover_dollars = 0.0
+            gross_exposure_dollars = sum(
+                abs(shares) * today_prices[sym] 
+                for t in self.tranches for sym, shares in t['shares'].items()
+            )
             
             if day_idx % self.rebalance_days == 0 and date in self._date_groups:
-                
-                # Determine which tranche is up for rotation today
                 tranche_idx = (day_idx // self.rebalance_days) % self.num_tranches
+                #budget = tranche_navs[tranche_idx] old, before dynamic scaling
+                tranche_total_value = tranche_navs[tranche_idx]
+                budget = tranche_total_value * active_scalar
                 
                 df = self._date_groups[date]
                 current_universe_size = len(df)
-                new_tranche_w = {}
-                base_target_gross = 1.0 
                 
-                # Dynamic Sizing
                 n_l = max(1, int(current_universe_size * self.n_longs)) if isinstance(self.n_longs, float) and 0.0 < self.n_longs < 1.0 else int(self.n_longs)
                 n_s = max(1, int(current_universe_size * self.n_shorts)) if isinstance(self.n_shorts, float) and 0.0 < self.n_shorts < 1.0 else int(self.n_shorts)
 
                 if current_universe_size >= n_l + n_s:
                     
-                    # For hysteresis, we look at what the ENTIRE portfolio currently holds, 
-                    # not just this single tranche. This keeps overlapping tranches aligned.
-                    current_longs = [sym for sym, w in current_weights.items() if w > 0]
-                    current_shorts = [sym for sym, w in current_weights.items() if w < 0]
+                    # Hysteresis: Look at shares held across ALL tranches
+                    current_longs = set(sym for t in self.tranches for sym, sh in t['shares'].items() if sh > 0)
+                    current_shorts = set(sym for t in self.tranches for sym, sh in t['shares'].items() if sh < 0)
 
-                    # Rank
                     df['rank_long'] = df["final_pred"].rank(ascending=False)
                     df['rank_short'] = df["final_pred"].rank(ascending=True)
                     
@@ -1315,115 +1436,110 @@ class HRPBacktest:
                     new_shorts = df[~df['act_symbol'].isin(current_shorts)].sort_values('rank_short').head(needed_shorts)
                     shorts = pd.concat([kept_shorts, new_shorts])
 
-                    # -------------------------------------------------------------
-                    # APPLY HIERARCHICAL RISK PARITY (HRP)
-                    # -------------------------------------------------------------
+                    # --- HRP WEIGHT CALCULATION ---
                     current_date_idx = self.returns_pivot.index.get_loc(date)
                     start_idx = max(0, current_date_idx - self.hrp_lookback)
                     past_returns = self.returns_pivot.iloc[start_idx:current_date_idx]
 
                     def get_safe_hrp_weights(symbols):
-                        if len(symbols) == 0:
-                            return {}, 0.0, 0.0
-                        
+                        if len(symbols) == 0: return {}, 0.0, 0.0
                         rets = past_returns[symbols]
                         raw_weights = compute_hrp_weights(rets, linkage_method="single")
                         
-                        # Handle dropped stocks (give them exactly half of the minimum allocated weight)
                         dropped_symbols = [s for s in symbols if s not in raw_weights]
                         if dropped_symbols:
-                            if len(raw_weights) > 0:
-                                min_w = min(raw_weights.values())
-                                fallback_w = min_w / 2.0  
-                            else:
-                                fallback_w = 1.0 / len(symbols)
+                            fallback_w = min(raw_weights.values()) / 2.0 if raw_weights else 1.0 / len(symbols)
+                            for sym in dropped_symbols: raw_weights[sym] = fallback_w
                                 
-                            for sym in dropped_symbols:
-                                raw_weights[sym] = fallback_w
-                        
-                        # Normalize to 1.0
                         total = sum(raw_weights.values())
                         final_w = {k: v / total for k, v in raw_weights.items() if total > 0}
-                            
-                        # Diagnostics
-                        w_array = np.array(list(final_w.values()))
-                        eff_n = 1.0 / np.sum(w_array**2) if len(w_array) > 0 else 0
-                        max_w = np.max(w_array) if len(w_array) > 0 else 0
                         
-                        return final_w, eff_n, max_w
+                        w_arr = np.array(list(final_w.values()))
+                        return final_w, (1.0 / np.sum(w_arr**2) if len(w_arr) > 0 else 0), (np.max(w_arr) if len(w_arr) > 0 else 0)
 
                     long_weights, active_eff_n_long, active_max_w_long = get_safe_hrp_weights(longs["act_symbol"].tolist())
                     short_weights, active_eff_n_short, active_max_w_short = get_safe_hrp_weights(shorts["act_symbol"].tolist())
 
-                    # --- Market Neutral Sizing with 150% Margin & Tranches ---
-                    # To be perfectly dollar/market neutral, Exposure_Long must == Exposure_Short.
-                    # Buying Power Used = Exposure_Long*(1.0) + Exposure_Short*(1.5).
-                    # If BP_Used = 1.0, then Base Exposure = 1.0 / 2.5 = 0.4.
+                    # --- BUYING POWER ALLOCATION (150% Margin Neutrality) ---
                     active_sides = (1 if len(long_weights) > 0 else 0) + (1 if len(short_weights) > 0 else 0)
                     if active_sides == 2:
-                        base_side_exposure = base_target_gross / 2.5
+                        side_budget = budget / 2.5
                     elif active_sides == 1:
-                        base_side_exposure = base_target_gross if len(long_weights) > 0 else base_target_gross / 1.5
+                        side_budget = budget if len(long_weights) > 0 else budget / 1.5
                     else:
-                        base_side_exposure = 0.0
+                        side_budget = 0.0
 
-                    # SCALE DOWN BY TRANCHE: Each tranche only gets 1/N of the exposure
-                    tranche_side_exposure = base_side_exposure / self.num_tranches
-
+                    new_shares = {}
                     for sym, w in long_weights.items():
-                        new_tranche_w[sym] = w * tranche_side_exposure
+                        new_shares[sym] = (w * side_budget) / today_prices[sym]
                     for sym, w in short_weights.items():
-                        new_tranche_w[sym] = -w * tranche_side_exposure
+                        new_shares[sym] = -(w * side_budget) / today_prices[sym] # Shorts = Negative Shares
 
-                # Overwrite only the specific tranche rotating today
-                tranches[tranche_idx] = new_tranche_w
+                    # --- EXECUTION & COSTS ---
+                    old_shares = self.tranches[tranche_idx]['shares']
+                    all_symbols = set(new_shares.keys()).union(old_shares.keys())
+                    
+                    for sym in all_symbols:
+                        old_s = old_shares.get(sym, 0.0)
+                        new_s = new_shares.get(sym, 0.0)
+                        turnover_dollars += abs(new_s - old_s) * today_prices[sym]
+                        
+                    cost = turnover_dollars * cost_rate
+                    
+                    # Update Tranche Sub-Account
+                    # Cash = Starting Budget - Cost of buying Longs + Proceeds from selling Shorts
+                    # Update Tranche Sub-Account
+                    net_spend = sum(new_shares[sym] * today_prices[sym] for sym in new_shares)
+                    
+                    # THE FIX: Subtract spend from the total starting tranche NAV, not the scaled budget!
+                    self.tranches[tranche_idx]['cash'] = tranche_navs[tranche_idx] - net_spend - cost
+                    self.tranches[tranche_idx]['shares'] = new_shares
+                    
+                    # Adjust Total NAV down by the exact cost of the trades made today
+                    total_nav -= cost
+
+            # =========================================================
+            # STEP 3: RECORD DAILY METRICS
+            # =========================================================
+            if prev_total_nav <= 0:
+                daily_ret = 0.0
+                total_nav = 0.0  # Stay at zero
+            else:
+                daily_ret = (total_nav / prev_total_nav) - 1.0
                 
-                # Re-aggregate the total portfolio weights from all active tranches
-                new_total_w = {}
-                for t in tranches:
-                    for sym, w in t.items():
-                        new_total_w[sym] = new_total_w.get(sym, 0.0) + w
+            prev_total_nav = total_nav
 
-                # Turnover is the difference between the old aggregate and the new aggregate
-                turnover = sum(
-                    abs(new_total_w.get(t, 0) - current_weights.get(t, 0))
-                    for t in set(list(new_total_w) + list(current_weights))
-                )
-                
-                current_weights = new_total_w
-
-            # 3. Final Net Return
-            port_cost = turnover * cost_rate 
-            net_port_ret = daily_port_gross_ret - port_cost
-            total_gross = sum(abs(w) for w in current_weights.values())
-
-            daily_rets.append(net_port_ret)
-            daily_turnover.append(turnover) 
-            daily_components.append({"gross_exposure": total_gross})
+            daily_rets.append(daily_ret)
+            daily_turnover_pct.append(turnover_dollars / total_nav if total_nav > 0 else 0)
+            daily_components.append({"gross_exposure": gross_exposure_dollars / total_nav if total_nav > 0 else 0})
             
             hrp_stats.append({
-                "eff_n_long": active_eff_n_long,
-                "eff_n_short": active_eff_n_short,
-                "max_w_long": active_max_w_long,
-                "max_w_short": active_max_w_short
+                "eff_n_long": active_eff_n_long, "eff_n_short": active_eff_n_short,
+                "max_w_long": active_max_w_long, "max_w_short": active_max_w_short
             })
 
         self.results = pd.DataFrame({
             "date": self.trading_dates,
             "return": daily_rets,
-            "turnover": daily_turnover
+            "turnover": daily_turnover_pct
         }).set_index("date")
 
         self.components = pd.DataFrame(daily_components, index=self.trading_dates)
         self.hrp_stats = pd.DataFrame(hrp_stats, index=self.trading_dates)
         
-        # Compute daily Rank IC
+        # Calculate Information Coefficient (IC)
         daily_ic = []
         for date in self.trading_dates:
             if date in self._date_groups:
                 day = self._date_groups[date]
-                if len(day) > 10:
-                    ic, _ = spearmanr(day["final_pred"], day[self.pnl_col])
+                # Because we no longer track a forward return column natively, we build it temporarily for IC tracking
+                df_ic = day.copy()
+                df_ic['fwd_close'] = self.price_history.shift(-1).loc[date, df_ic['act_symbol']].values
+                df_ic['fwd_ret'] = (df_ic['fwd_close'] / df_ic['close']) - 1.0
+                
+                df_ic = df_ic.dropna(subset=['fwd_ret'])
+                if len(df_ic) > 10:
+                    ic, _ = spearmanr(df_ic["final_pred"], df_ic["fwd_ret"])
                     daily_ic.append(ic if not np.isnan(ic) else 0.0)
                 else:
                     daily_ic.append(0.0)
@@ -1448,17 +1564,15 @@ class HRPBacktest:
         ann_ret = dr.mean() * 252
         calmar = ann_ret / abs(max_dd) if max_dd != 0 else 0
 
-        current_dur = 0
-        max_dur = 0
+        current_dur, max_dur = 0, 0
         for uw in cum < peak:
             current_dur = current_dur + 1 if uw else 0
             max_dur = max(max_dur, current_dur)
 
         avg_daily_turnover = self.results["turnover"].mean()
-        ann_turnover = avg_daily_turnover * 252
 
         print(f"\n{'='*50}")
-        print(f"HRP TRANCHE BACKTEST RESULTS")
+        print(f"LEDGER-BASED HRP TRANCHE BACKTEST RESULTS")
         print(f"{'='*50}")
         print(f"Sharpe           : {sharpe:.4f}")
         print(f"Annual Return    : {ann_ret:.2%}")
@@ -1468,22 +1582,20 @@ class HRPBacktest:
         print(f"Calmar           : {calmar:.4f}")
         print(f"Win Rate         : {(dr > 0).mean():.2%}")
         print(f"Avg Daily Turnover: {avg_daily_turnover:.2%}")
-        print(f"Annual Turnover   : {ann_turnover:.2f}x")
+        print(f"Annual Turnover   : {avg_daily_turnover * 252:.2f}x")
         print(f"Avg Eff. N Longs  : {self.hrp_stats['eff_n_long'].mean():.1f} (Target: {self.n_longs})")
         print(f"Avg Max Wt Long   : {self.hrp_stats['max_w_long'].mean():.2%}")
 
     def plot(self):
-        if not hasattr(self, "results"):
-            raise Exception("Run run() first.")
+        if not hasattr(self, "results"): raise Exception("Run run() first.")
 
         dr = self.results["return"].values
         dates = self.results.index
-
         fig, axes = plt.subplots(3, 3, figsize=(18, 12))
 
-        # --- Row 1 ---
         cum = np.cumprod(1 + dr)
         axes[0, 0].plot(dates, cum, color="purple", lw=1.5)
+        
         axes[0, 0].axhline(1, color="black", lw=0.5)
         axes[0, 0].set_title("Cumulative Return")
 
@@ -1498,28 +1610,20 @@ class HRPBacktest:
         axes[0, 2].set_title("HRP Diversification (Effective N)")
         axes[0, 2].legend(loc="lower right")
 
-        # --- Row 2 ---
-        rs = pd.Series(dr).rolling(60).apply(
-            lambda x: x.mean() / (x.std() + 1e-8) * np.sqrt(252)
-        )
+        rs = pd.Series(dr).rolling(60).apply(lambda x: x.mean() / (x.std() + 1e-8) * np.sqrt(252))
         axes[1, 0].plot(dates, rs.values, color="blue", lw=1, label="Sharpe")
         axes[1, 0].axhline(0, color="red", ls="--", lw=0.5)
         axes[1, 0].set_ylabel("Sharpe", color="blue")
-        axes[1, 0].tick_params(axis="y", labelcolor="blue")
-
+        
         ax_ic = axes[1, 0].twinx()
         rolling_ic = self.results["ic"].rolling(60).mean()
         ax_ic.plot(dates, rolling_ic.values, color="green", lw=1, alpha=0.8, label="IC")
         ax_ic.axhline(0, color="green", ls=":", lw=0.5, alpha=0.5)
         ax_ic.set_ylabel("Rank IC", color="green")
-        ax_ic.tick_params(axis="y", labelcolor="green")
         axes[1, 0].set_title("Rolling 60-Day Sharpe & IC")
 
         monthly = pd.Series(dr, index=dates).resample("ME").sum()
-        axes[1, 1].bar(
-            range(len(monthly)), monthly.values,
-            color=["green" if r > 0 else "red" for r in monthly], alpha=0.7,
-        )
+        axes[1, 1].bar(range(len(monthly)), monthly.values, color=["green" if r > 0 else "red" for r in monthly], alpha=0.7)
         axes[1, 1].set_title("Monthly Returns")
         axes[1, 1].set_xticks([])
 
@@ -1529,7 +1633,6 @@ class HRPBacktest:
         axes[1, 2].set_title("HRP Concentration (Max Single Position %)")
         axes[1, 2].legend(loc="upper right")
 
-        # --- Row 3 ---
         axes[2, 0].plot(dates, self.components["gross_exposure"], color="darkorange", lw=1)
         axes[2, 0].set_title("Gross Exposure (Dollar Base)")
         axes[2, 0].set_ylim(0, 1.2)
@@ -1538,6 +1641,129 @@ class HRPBacktest:
         axes[2, 1].set_title("Daily Turnover")
         
         axes[2, 2].axis("off")
-
         plt.tight_layout()
         plt.show()
+
+    def set_scaling_params(self, 
+                           target_vol=0.10, vol_lookback=20, max_vol_leverage=1.0,
+                           dd_warning_threshold=-0.15, dd_penalty=0.50, dd_kill_threshold=-0.25,
+                           use_conviction_scaling=True, conviction_lookback=20):
+        """
+        Configures dynamic capital scaling based on Volatility, Drawdowns, and Model Conviction.
+        
+        Args:
+            target_vol: The annualized portfolio volatility to target (default 10%).
+            vol_lookback: Days to measure realized volatility.
+            max_vol_leverage: Cap on vol-scaling. 1.0 means it will only scale down, never lever up.
+            dd_warning_threshold: Drawdown level to trigger the first step-down.
+            dd_penalty: Exposure multiplier when in the warning zone (e.g., 0.5 = 50% cut).
+            dd_kill_threshold: Drawdown level to trigger a complete halt (0% exposure).
+            use_conviction_scaling: Whether to scale based on recent model win-rate.
+            conviction_lookback: Days to measure rolling win-rate.
+        """
+        self.use_dynamic_scaling = True
+        
+        # Volatility Params
+        self.target_vol = target_vol
+        self.vol_lookback = vol_lookback
+        self.max_vol_leverage = max_vol_leverage
+        
+        # Drawdown Params
+        self.dd_warning_threshold = dd_warning_threshold
+        self.dd_penalty = dd_penalty
+        self.dd_kill_threshold = dd_kill_threshold
+        
+        # Conviction Params
+        self.use_conviction_scaling = use_conviction_scaling
+        self.conviction_lookback = conviction_lookback
+        
+        print(f"Dynamic Scaling Enabled: Target Vol={target_vol*100}%, DD Warn/Kill={dd_warning_threshold*100}%/{dd_kill_threshold*100}%")
+
+def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
+    """
+    Optimizes HRPBacktest parameters over a specific In-Sample time period.
+    
+    Args:
+        portfolio: The loaded Portfolio object.
+        train_start (str): Start date for In-Sample training (e.g., '2016-01-01').
+        train_end (str): End date for In-Sample training (e.g., '2020-12-31').
+        n_trials (int): Number of combinations to test.
+        
+    Returns:
+        dict: The best parameter combination.
+    """
+    print(f"--- Starting HRP Optimization ({train_start} to {train_end}) ---")
+    
+    # 1. Isolate the Training Data (In-Sample)
+    # We create a dummy portfolio to safely slice data without modifying the original
+    class SlicedPortfolio: pass
+    train_port = SlicedPortfolio()
+    train_port.has_data = True
+    
+    # Filter the dates
+    mask = (pd.to_datetime(portfolio.data['date']) >= pd.to_datetime(train_start)) & \
+           (pd.to_datetime(portfolio.data['date']) <= pd.to_datetime(train_end))
+    train_port.data = portfolio.data[mask].copy()
+
+    # 2. Define the Optuna Objective
+    def objective(trial):
+        # Suggest parameter combinations
+        n_pos = trial.suggest_int("n_positions", 10, 40, step=5)
+        rebalance_days = trial.suggest_int("rebalance_days", 1, 5)
+        holding_period = trial.suggest_int("holding_period", 1, 10)
+        hrp_lookback = trial.suggest_int("hrp_lookback", 30, 150, step=30)
+        buffer_multiplier = trial.suggest_float("buffer_multiplier", 1.0, 3.0, step=0.5)
+        smooth_preds = trial.suggest_categorical("smooth_predictions", [True, False])
+        
+        # Run the backtest silently
+        try:
+            bt = HRPBacktest(
+                portfolio=train_port,
+                n_longs=n_pos,
+                n_shorts=n_pos,
+                holding_period=holding_period,
+                rebalance_days=rebalance_days,
+                hrp_lookback=hrp_lookback,
+                smooth_predictions=smooth_preds,
+                buffer_multiplier=buffer_multiplier,
+                cost_bps=5.0
+            )
+            res = bt.run(verbose=False)
+        except Exception as e:
+            # If the parameters crash the math, instantly fail the trial
+            return -999.0
+            
+        # 3. Calculate Fitness Score
+        dr = res['return'].values
+        if len(dr) < 50 or np.std(dr) == 0:
+            return -999.0
+            
+        cum = np.cumprod(1 + dr)
+        peak = np.maximum.accumulate(cum)
+        max_dd = ((cum - peak) / peak).min()
+        
+        # If the strategy went bankrupt, fail the trial
+        if max_dd <= -0.99 or cum[-1] <= 0:
+            return -999.0
+            
+        sharpe = (dr.mean() / dr.std(ddof=1)) * np.sqrt(252)
+        
+        # THE OBJECTIVE SCORE: Sharpe Ratio penalized by Max Drawdown
+        # E.g. Sharpe of 2.0 with a -50% DD -> 2.0 * (1 - 0.50) = Score of 1.0
+        # This prevents the "Frankenstein Effect" by weeding out fragile portfolios.
+        score = sharpe * (1.0 + max_dd) 
+        
+        return score
+
+    # 3. Run the Optimizer
+    optuna.logging.set_verbosity(optuna.logging.WARNING) # Suppress heavy console spam
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    
+    print("\nOptimization Complete!")
+    print(f"Best Objective Score: {study.best_value:.4f}")
+    print("Best Parameters:")
+    for key, value in study.best_params.items():
+        print(f"  {key}: {value}")
+        
+    return study.best_params
