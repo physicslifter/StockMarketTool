@@ -1357,7 +1357,7 @@ class HRPBacktest:
             self.nav_history.append(total_nav)
             
             # Use a 252-day rolling peak (1 year)
-            rolling_peak = max(self.nav_history[-252:]) 
+            rolling_peak = max(self.nav_history[-100:]) 
             current_dd = (total_nav / rolling_peak) - 1.0 if rolling_peak > 0 else 0.0
             
             if self.use_dynamic_scaling and day_idx > max(self.vol_lookback, self.conviction_lookback):
