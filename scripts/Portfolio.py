@@ -78,8 +78,15 @@ class Portfolio:
         if not self.model.data_generated:
             self.model.generate_targets_and_features()
 
-        feature_keys = [k for k in self.model.data.columns if "F" in k.split("_")]
-        self.model.data["pred_return"] = self.model.model.predict(self.model.data[feature_keys])
+        # AFTER — ask the booster which columns it was actually trained on
+        trained_features = self.model.model.feature_name()
+        missing = [c for c in trained_features if c not in self.model.data.columns]
+        if missing:
+            raise Exception(
+                f"Booster was trained on {len(trained_features)} features, but "
+                f"{len(missing)} are missing from regenerated data: {missing[:5]}..."
+            )
+        self.model.data["pred_return"] = self.model.model.predict(self.model.data[trained_features])
 
         # Cross-sectional prediction z-score (for ranking)
         self.model.data["pred_zscore"] = self.model.data.groupby("date")["pred_return"].transform(
@@ -753,6 +760,7 @@ class ManagedBacktest:
         
         daily_rets = []
         daily_scalars = []
+        daily_scalar_components = []
         daily_turnover = []
         daily_components = []
 
@@ -1244,10 +1252,15 @@ class HRPBacktest:
 
     def __init__(self, portfolio, n_longs=20, n_shorts=20, holding_period=5, 
                  rebalance_days=1, cost_bps=5.0, hrp_lookback=60, 
-                 smooth_predictions=False, buffer_multiplier=1.0, initial_capital=2000.0):
+                 smooth_predictions=False, buffer_multiplier=1.0, initial_capital=2000.0,
+                 sizing_method = "dollar_neutral"):
         
         if not portfolio.has_data:
             raise Exception("Portfolio has no data. Run get_model_data() first.")
+
+        if sizing_method not in ["dollar_neutral", "beta_neutral"]:
+            raise ValueError("sizing_method must be 'dollar_neutral' or 'beta_neutral'")
+        self.sizing_method = sizing_method
 
         self.data = portfolio.data.copy()
         self.n_longs = n_longs
@@ -1269,12 +1282,24 @@ class HRPBacktest:
         
         # Build a master Price History table. 
         # ffill() ensures if a stock halts or drops from the universe, we can still value existing shares.
+        # Need open prices for execution and MTM
+        if "open" not in self.data.columns:
+            raise Exception("Portfolio data must contain 'open' column for open-execution backtest.")
+
         self.price_history = self.data.pivot_table(
-            index="date", columns="act_symbol", values="close"
+            index="date", columns="act_symbol", values="open"
         ).ffill()
 
         # Pre-compute a clean returns matrix purely for the HRP correlation algorithm
         self.returns_pivot = self.price_history.pct_change().clip(lower=-0.75, upper=1.0).fillna(0)
+
+        if self.sizing_method == "beta_neutral":
+            print("Pre-computing 60-day rolling Beta for Beta-Neutral sizing...")
+            mkt_ret = self.returns_pivot.mean(axis=1) # Market proxy
+            mkt_var = mkt_ret.rolling(60, min_periods=20).var()
+            rolling_cov = self.returns_pivot.rolling(60, min_periods=20).cov(mkt_ret)
+            self.beta_pivot = rolling_cov.div(mkt_var, axis=0)
+            self.beta_pivot = self.beta_pivot.ffill().fillna(1.0).clip(0.1, 3.0)
 
         # Apply optional smoothing
         if self.smooth_predictions:
@@ -1311,11 +1336,41 @@ class HRPBacktest:
         active_eff_n_long, active_eff_n_short = 0, 0
         active_max_w_long, active_max_w_short = 0, 0
         
+        # --- NEW: PRE-COMPUTE DAILY 1-DAY IC FOR CONVICTION SCALING ---
+        print("Pre-computing historical Rank IC for conviction scaling...")
+        df_ic = self.data.copy()
+        
+        # Calculate the 1-day forward return to evaluate the prediction
+        df_ic['fwd_ret'] = df_ic.groupby('act_symbol')['close'].shift(-1) / df_ic['close'] - 1.0
+        
+        def calc_safe_ic(group):
+            if len(group) > 10:
+                val, _ = spearmanr(group['final_pred'], group['fwd_ret'])
+                return val if not np.isnan(val) else 0.0
+            return 0.0
+            
+        raw_daily_ic = df_ic.groupby('date').apply(calc_safe_ic)
+        
+        # CRITICAL: Shift by 1! 
+        # On Tuesday evening, we only know the IC of Monday's predictions (which resolved Tuesday).
+        # We must shift it so 'date' contains the most recently resolved IC without lookahead bias.
+        self.historical_ic = raw_daily_ic.shift(1).fillna(0.0)
+
+        # --- NEW: PRE-COMPUTE CROSS-SECTIONAL PREDICTION SPREAD ---
+        print("Pre-computing cross-sectional prediction spread...")
+        # Std dev of today's predictions across all assets
+        self.daily_spread = self.data.groupby('date')['final_pred'].std().fillna(0.0)
+        
+        prev_total_nav = self.initial_capital
+        peak_nav = self.initial_capital
+        # ... (rest of the code continues: daily_scalars = [], etc.)
+
         prev_total_nav = self.initial_capital
 
         # --- NEW: Tracking variables for Scaling ---
         peak_nav = self.initial_capital
         daily_scalars = []
+        daily_scalar_components = []
         if not hasattr(self, 'use_dynamic_scaling'):
             self.use_dynamic_scaling = False
 
@@ -1343,6 +1398,10 @@ class HRPBacktest:
             # STEP 2: I IF APPLICABLE, IMPLEMENT DYNAMIC 
             # =========================================================
             active_scalar = 1.0
+            dd_scalar = 1.0
+            vol_scalar = 1.0
+            ic_scalar = 1.0
+            spread_scalar = 1.0
             
             # Update peak NAV and current drawdown
             """
@@ -1357,10 +1416,10 @@ class HRPBacktest:
             self.nav_history.append(total_nav)
             
             # Use a 252-day rolling peak (1 year)
-            rolling_peak = max(self.nav_history[-100:]) 
+            rolling_peak = max(self.nav_history[-252:]) 
             current_dd = (total_nav / rolling_peak) - 1.0 if rolling_peak > 0 else 0.0
             
-            if self.use_dynamic_scaling and day_idx > max(self.vol_lookback, self.conviction_lookback):
+            if self.use_dynamic_scaling and day_idx > max(self.vol_lookback, self.ic_lookback):
                 
                 # 1. DRAWDOWN CONTROL (Step-Function)
                 if current_dd <= self.dd_kill_threshold:
@@ -1382,18 +1441,106 @@ class HRPBacktest:
                     vol_scalar = 1.0
                     
                 # 3. CONVICTION SCALING (Kelly Proxy: Rolling Hit Rate)
+                """
+                Old, linearly scaling down conviction
                 # If the model has been losing consistently for 20 days, scale down smoothly.
                 conviction_scalar = 1.0
                 if self.use_conviction_scaling:
                     win_rate = sum(1 for r in recent_rets[-self.conviction_lookback:] if r > 0) / self.conviction_lookback
                     # If win rate drops below 40%, start linearly scaling down exposure
                     if win_rate < 0.40:
-                        conviction_scalar = max(0.0, win_rate / 0.40)
+                        conviction_scalar = max(0.0, win_rate / 0.40)"""
+                '''
+                New: hard stop on conviction
+                
+                conviction_scalar = 1.0
+                if self.use_conviction_scaling:
+                    # Look at the last 5 days
+                    recent_5 = daily_rets[-self.conviction_lookback:]
+                    win_rate = sum(1 for r in recent_5 if r > 0) / len(recent_5)
+                    
+                    # If we lost money on 4 out of the last 5 days, the market is broken.
+                    # Hard-cut exposure to 0% immediately. 
+                    if win_rate <= 0.20:
+                        conviction_scalar = 0.0
+                '''
+                '''
+                New: hard stop w/ heartbeat
+                '''
+                
+                '''
+                Old Method w/ heartbeat for conviction
+                # 3. CONVICTION SCALING (With Heartbeat)
+                conviction_scalar = 1.0
+                if self.use_conviction_scaling:
+                    # Optional: Add a tiny epsilon so exact 0.0 returns (cash days) don't count as losses
+                    win_rate = sum(1 for r in recent_rets[-self.conviction_lookback:] if r > -1e-6) / self.conviction_lookback
+                    
+                    if win_rate < 0.40:
+                        # THE FIX: Floor the scalar at 0.10 (10% Heartbeat Exposure)
+                        raw_conviction = win_rate / 0.40
+                        conviction_scalar = max(0.10, raw_conviction)
+                    
+                    # 4. APPLY THE MOST RESTRICTIVE SCALAR (The Min Function)
+                    active_scalar = min(dd_scalar, vol_scalar, conviction_scalar)
+                '''
+
+                # 3. ROLLING IC SCALING (Smoothed S-Curve Alpha Sensor)
+                ic_scalar = 1.0
+                if self.use_ic_scaling:
+                    recent_ics = self.historical_ic.iloc[day_idx - self.ic_lookback : day_idx]
+                    mean_ic = recent_ics.mean()
+                    
+                    # --- SMOOTHED S-CURVE PARAMETERS ---
+                    heartbeat = 0.33
+                    
+                    # Shift the cliff lower. (e.g., if threshold is 0.02, midpoint is now 0.005).
+                    # It will only aggressively cut exposure if IC approaches zero.
+                    midpoint = self.ic_threshold * 0.25  
+                    
+                    # Flatten the slope. (Changed from 10.0 to 3.0).
+                    # Lower numbers = wider, smoother transition. Higher numbers = binary light-switch.
+                    steepness = 1 
+                    k = steepness / self.ic_threshold  
+                    
+                    exponent = np.clip(-k * (mean_ic - midpoint), -100, 100)
+                    sigmoid = 1.0 / (1.0 + np.exp(exponent))
+                    
+                    ic_scalar = heartbeat + (1.0 - heartbeat) * sigmoid
                         
                 # 4. APPLY THE MOST RESTRICTIVE SCALAR (The Min Function)
-                active_scalar = min(dd_scalar, vol_scalar, conviction_scalar)
+                # --- NEW: PREDICTION SPREAD SCALING ---
+                spread_scalar = 1.0
+                if self.use_spread_scaling and day_idx > self.spread_lookback:
+                    # Get the spread history for the lookback window
+                    recent_spreads = self.daily_spread.iloc[day_idx - self.spread_lookback : day_idx].values
+                    today_spread = self.daily_spread.iloc[day_idx]
+                    
+                    if len(recent_spreads) > 0 and recent_spreads.std() > 0:
+                        # Calculate rank percentile of today's spread (0.0 to 1.0)
+                        # e.g., 0.10 means today's spread is smaller than 90% of recent days
+                        spread_pct = np.sum(recent_spreads <= today_spread) / len(recent_spreads)
+                        
+                        # Map the percentile to our allowed exposure range [floor, 1.0]
+                        spread_scalar = self.spread_floor + (1.0 - self.spread_floor) * spread_pct
+                    else:
+                        spread_scalar = 1.0
+
+                # 4. APPLY THE MOST RESTRICTIVE SCALAR (The Min Function)
+                # Now includes spread_scalar!
+                active_scalar = min(dd_scalar, vol_scalar, ic_scalar, spread_scalar)
+                #active_scalar = min(dd_scalar, vol_scalar, ic_scalar)
                 
             daily_scalars.append(active_scalar)
+
+            daily_scalar_components.append({
+                "dd_scalar": dd_scalar,
+                "vol_scalar": vol_scalar,
+                "ic_scalar": ic_scalar,
+                "spread_scalar": spread_scalar,
+                "active_scalar": active_scalar,
+            })
+
             # --- END DYNAMIC SCALING LOGIC ---
 
             # =========================================================
@@ -1460,20 +1607,49 @@ class HRPBacktest:
                     long_weights, active_eff_n_long, active_max_w_long = get_safe_hrp_weights(longs["act_symbol"].tolist())
                     short_weights, active_eff_n_short, active_max_w_short = get_safe_hrp_weights(shorts["act_symbol"].tolist())
 
-                    # --- BUYING POWER ALLOCATION (150% Margin Neutrality) ---
+                    # --- DYNAMIC BUYING POWER ALLOCATION ---
+                    #allows for beta-neutral or dollar-neutral
                     active_sides = (1 if len(long_weights) > 0 else 0) + (1 if len(short_weights) > 0 else 0)
-                    if active_sides == 2:
-                        side_budget = budget / 2.5
-                    elif active_sides == 1:
-                        side_budget = budget if len(long_weights) > 0 else budget / 1.5
-                    else:
-                        side_budget = 0.0
+                    
+                    if self.sizing_method == "dollar_neutral":
+                        if active_sides == 2:
+                            side_budget = budget / 2.5 # 100% Long + 150% Short Margin = 2.5
+                            long_budget = side_budget
+                            short_budget = side_budget
+                        elif active_sides == 1:
+                            long_budget = budget / 1.0 if len(long_weights) > 0 else 0.0
+                            short_budget = budget / 1.5 if len(short_weights) > 0 else 0.0
+                        else:
+                            long_budget = 0.0
+                            short_budget = 0.0
+
+                    elif self.sizing_method == "beta_neutral":
+                        if active_sides == 2:
+                            today_betas = self.beta_pivot.loc[date]
+                            
+                            basket_beta_long = sum(w * today_betas.get(sym, 1.0) for sym, w in long_weights.items())
+                            basket_beta_short = sum(w * today_betas.get(sym, 1.0) for sym, w in short_weights.items())
+                            
+                            if pd.isna(basket_beta_long) or basket_beta_long == 0: basket_beta_long = 1.0
+                            if pd.isna(basket_beta_short) or basket_beta_short == 0: basket_beta_short = 1.0
+                            
+                            beta_ratio = basket_beta_short / basket_beta_long
+                            beta_ratio = np.clip(beta_ratio, 0.33, 3.0)
+                            
+                            short_budget = budget / (beta_ratio + 1.5)
+                            long_budget = short_budget * beta_ratio
+                        elif active_sides == 1:
+                            long_budget = budget / 1.0 if len(long_weights) > 0 else 0.0
+                            short_budget = budget / 1.5 if len(short_weights) > 0 else 0.0
+                        else:
+                            long_budget = 0.0
+                            short_budget = 0.0
 
                     new_shares = {}
                     for sym, w in long_weights.items():
-                        new_shares[sym] = (w * side_budget) / today_prices[sym]
+                        new_shares[sym] = (w * long_budget) / today_prices[sym]
                     for sym, w in short_weights.items():
-                        new_shares[sym] = -(w * side_budget) / today_prices[sym] # Shorts = Negative Shares
+                        new_shares[sym] = -(w * short_budget) / today_prices[sym]
 
                     # --- EXECUTION & COSTS ---
                     old_shares = self.tranches[tranche_idx]['shares']
@@ -1523,6 +1699,8 @@ class HRPBacktest:
             "return": daily_rets,
             "turnover": daily_turnover_pct
         }).set_index("date")
+
+        self.scaling_history = pd.DataFrame(daily_scalar_components, index=self.trading_dates)
 
         self.components = pd.DataFrame(daily_components, index=self.trading_dates)
         self.hrp_stats = pd.DataFrame(hrp_stats, index=self.trading_dates)
@@ -1640,46 +1818,92 @@ class HRPBacktest:
         axes[2, 1].plot(dates, self.results["turnover"], color="purple", lw=1, alpha=0.5)
         axes[2, 1].set_title("Daily Turnover")
         
-        axes[2, 2].axis("off")
+        if hasattr(self, "scaling_history") and len(self.scaling_history) > 0:
+            sh = self.scaling_history
+            ax_s = axes[2, 2]
+
+            scalar_cols = ["dd_scalar", "vol_scalar", "ic_scalar", "spread_scalar"]
+            colors = {
+                "dd_scalar":     "#d62728",  # red
+                "vol_scalar":    "#1f77b4",  # blue
+                "ic_scalar":     "#2ca02c",  # green
+                "spread_scalar": "#ff7f0e",  # orange
+            }
+            labels = {
+                "dd_scalar": "Drawdown",
+                "vol_scalar": "Volatility",
+                "ic_scalar": "IC",
+                "spread_scalar": "Spread",
+            }
+
+            # Identify which scalar is binding (the argmin) on each day.
+            binding = sh[scalar_cols].idxmin(axis=1)
+
+            # Shade the area under active_scalar with the color of whichever
+            # scalar is binding. This is the key visual: the COLOR of the shaded
+            # region tells you which scalar is throttling exposure.
+            for col in scalar_cols:
+                mask = (binding == col).values
+                if mask.any():
+                    y = sh["active_scalar"].where(mask)
+                    ax_s.fill_between(sh.index, 0, y,
+                                      color=colors[col], alpha=0.55,
+                                      linewidth=0, label=labels[col])
+
+            # Thin reference lines for each individual scalar, drawn UNDER nothing
+            # so they remain visible above the shaded region for context.
+            for col in scalar_cols:
+                ax_s.plot(sh.index, sh[col],
+                          color=colors[col], lw=0.8, alpha=0.45)
+
+            # Active scalar as a thin black outline on top of the shading,
+            # so the exact exposure level is readable but doesn't dominate.
+            ax_s.plot(sh.index, sh["active_scalar"],
+                      color="black", lw=1.0, alpha=0.9)
+
+            ax_s.set_ylim(0, 1.05)
+            ax_s.set_title("Scaling Coefficients (color = binding constraint)")
+            ax_s.legend(loc="lower left", fontsize=7, ncol=2)
+        else:
+            axes[2, 2].axis("off")
+        
         plt.tight_layout()
         plt.show()
 
     def set_scaling_params(self, 
                            target_vol=0.10, vol_lookback=20, max_vol_leverage=1.0,
                            dd_warning_threshold=-0.15, dd_penalty=0.50, dd_kill_threshold=-0.25,
-                           use_conviction_scaling=True, conviction_lookback=20):
+                           use_ic_scaling=True, ic_lookback=20, ic_threshold=0.02,
+                           # --- NEW PARAMS BELOW ---
+                           use_spread_scaling=True, spread_lookback=30, spread_floor=0.3):
         """
-        Configures dynamic capital scaling based on Volatility, Drawdowns, and Model Conviction.
-        
-        Args:
-            target_vol: The annualized portfolio volatility to target (default 10%).
-            vol_lookback: Days to measure realized volatility.
-            max_vol_leverage: Cap on vol-scaling. 1.0 means it will only scale down, never lever up.
-            dd_warning_threshold: Drawdown level to trigger the first step-down.
-            dd_penalty: Exposure multiplier when in the warning zone (e.g., 0.5 = 50% cut).
-            dd_kill_threshold: Drawdown level to trigger a complete halt (0% exposure).
-            use_conviction_scaling: Whether to scale based on recent model win-rate.
-            conviction_lookback: Days to measure rolling win-rate.
+        Configures dynamic capital scaling based on Volatility, Drawdowns, Model Rank IC, and Prediction Spread.
         """
         self.use_dynamic_scaling = True
         
-        # Volatility Params
+        # Volatility & Drawdown Params
         self.target_vol = target_vol
         self.vol_lookback = vol_lookback
         self.max_vol_leverage = max_vol_leverage
-        
-        # Drawdown Params
         self.dd_warning_threshold = dd_warning_threshold
         self.dd_penalty = dd_penalty
         self.dd_kill_threshold = dd_kill_threshold
         
-        # Conviction Params
-        self.use_conviction_scaling = use_conviction_scaling
-        self.conviction_lookback = conviction_lookback
+        # IC Conviction Params
+        self.use_ic_scaling = use_ic_scaling
+        self.ic_lookback = ic_lookback
+        self.ic_threshold = ic_threshold
+
+        # Spread (Dispersion) Params
+        self.use_spread_scaling = use_spread_scaling
+        self.spread_lookback = spread_lookback
+        self.spread_floor = spread_floor
         
         print(f"Dynamic Scaling Enabled: Target Vol={target_vol*100}%, DD Warn/Kill={dd_warning_threshold*100}%/{dd_kill_threshold*100}%")
+        print(f"IC Scaling Enabled: Lookback={ic_lookback}d, Target IC={ic_threshold}")
+        print(f"Spread Scaling Enabled: Lookback={spread_lookback}d, Min Exposure Floor={spread_floor*100}%")
 
-def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
+def optimize_hrp_strategy_old(portfolio, train_start, train_end, n_trials=50):
     """
     Optimizes HRPBacktest parameters over a specific In-Sample time period.
     
@@ -1757,6 +1981,163 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
 
     # 3. Run the Optimizer
     optuna.logging.set_verbosity(optuna.logging.WARNING) # Suppress heavy console spam
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    
+    print("\nOptimization Complete!")
+    print(f"Best Objective Score: {study.best_value:.4f}")
+    print("Best Parameters:")
+    for key, value in study.best_params.items():
+        print(f"  {key}: {value}")
+        
+    return study.best_params
+
+
+def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
+    """
+    Optimizes HRPBacktest parameters over a specific In-Sample time period.
+    Includes both structural parameters (N, lookbacks, holding) and 
+    dynamic scaling parameters (vol target, drawdown thresholds, IC, spread).
+    
+    Args:
+        portfolio: The loaded Portfolio object.
+        train_start (str): Start date for In-Sample training (e.g., '2016-01-01').
+        train_end (str): End date for In-Sample training (e.g., '2020-12-31').
+        n_trials (int): Number of combinations to test.
+        
+    Returns:
+        dict: The best parameter combination.
+    """
+    print(f"--- Starting HRP Optimization ({train_start} to {train_end}) ---")
+    
+    # 1. Isolate the Training Data (In-Sample)
+    class SlicedPortfolio: pass
+    train_port = SlicedPortfolio()
+    train_port.has_data = True
+    
+    mask = (pd.to_datetime(portfolio.data['date']) >= pd.to_datetime(train_start)) & \
+           (pd.to_datetime(portfolio.data['date']) <= pd.to_datetime(train_end))
+    train_port.data = portfolio.data[mask].copy()
+
+    # 2. Define the Optuna Objective
+    def objective(trial):
+        # ============================================================
+        # STRUCTURAL PARAMETERS
+        # ============================================================
+        n_pos             = trial.suggest_int("n_positions", 2, 20, step=1)
+        rebalance_days    = trial.suggest_int("rebalance_days", 1, 5)
+        holding_period    = 5 #trial.suggest_int("holding_period", 1, 10)
+        hrp_lookback      = trial.suggest_int("hrp_lookback", 30, 150, step=30)
+        buffer_multiplier = trial.suggest_float("buffer_multiplier", 1.0, 3.0, step=0.2)
+        smooth_preds      = trial.suggest_categorical("smooth_predictions", [True, False])
+        sizing_method     = trial.suggest_categorical("sizing_method", ["dollar_neutral", "beta_neutral"])
+        
+        # ============================================================
+        # DYNAMIC SCALING PARAMETERS
+        # Each scaler has an on/off toggle plus its own settings. When 
+        # off, the scaler is pinned at 1.0 and contributes nothing to 
+        # the active min. This lets the optimizer decide whether each 
+        # scaler is helpful at all, not just how to tune it.
+        # ============================================================
+        
+        # Volatility scaling (always on - it's the baseline risk control)
+        target_vol        = trial.suggest_float("target_vol", 0.04, 0.20, step=0.02)
+        vol_lookback      = trial.suggest_int("vol_lookback", 10, 130, step=10)
+        max_vol_leverage  = 1 #trial.suggest_float("max_vol_leverage", 1.0, 2.0, step=0.25)
+        
+        # Drawdown scaling (toggleable)
+        use_dd_scaling = trial.suggest_categorical("use_dd_scaling", [True, False])
+        if use_dd_scaling:
+            dd_warning_threshold = trial.suggest_float("dd_warning_threshold", -0.4, -0.03, step=0.02)
+            dd_kill_threshold    = trial.suggest_float("dd_kill_threshold", -0.50, -0.25, step=0.05)
+            dd_penalty           = trial.suggest_float("dd_penalty", 0.1, 0.75, step=0.15)
+            # Guard: kill threshold must be strictly worse than warning threshold.
+            if dd_kill_threshold >= dd_warning_threshold:
+                return -999.0
+        else:
+            # Effectively disabled: thresholds far enough that they never trigger.
+            dd_warning_threshold = -0.99
+            dd_kill_threshold    = -0.999
+            dd_penalty           = 1.0
+        
+        # IC scaling (toggleable)
+        use_ic_scaling = trial.suggest_categorical("use_ic_scaling", [True, False])
+        if use_ic_scaling:
+            ic_lookback  = trial.suggest_int("ic_lookback", 10, 120, step=10)
+            ic_threshold = trial.suggest_float("ic_threshold", -0.05, 0.05, step=0.005)
+        else:
+            ic_lookback  = 20
+            ic_threshold = 0.02
+        
+        # Spread scaling (toggleable)
+        use_spread_scaling = trial.suggest_categorical("use_spread_scaling", [True, False])
+        if use_spread_scaling:
+            spread_lookback = trial.suggest_int("spread_lookback", 10, 120, step=10)
+            spread_floor    = trial.suggest_float("spread_floor", 0.1, 0.7, step=0.1)
+        else:
+            spread_lookback = 30
+            spread_floor    = 0.3
+        
+        # ============================================================
+        # RUN THE BACKTEST
+        # ============================================================
+        try:
+            bt = HRPBacktest(
+                portfolio=train_port,
+                n_longs=n_pos,
+                n_shorts=n_pos,
+                holding_period=holding_period,
+                rebalance_days=rebalance_days,
+                hrp_lookback=hrp_lookback,
+                smooth_predictions=smooth_preds,
+                buffer_multiplier=buffer_multiplier,
+                sizing_method=sizing_method,
+                cost_bps=5.0
+            )
+            
+            # Apply dynamic scaling configuration.
+            bt.set_scaling_params(
+                target_vol=target_vol,
+                vol_lookback=vol_lookback,
+                max_vol_leverage=max_vol_leverage,
+                dd_warning_threshold=dd_warning_threshold,
+                dd_penalty=dd_penalty,
+                dd_kill_threshold=dd_kill_threshold,
+                use_ic_scaling=use_ic_scaling,
+                ic_lookback=ic_lookback,
+                ic_threshold=ic_threshold,
+                use_spread_scaling=use_spread_scaling,
+                spread_lookback=spread_lookback,
+                spread_floor=spread_floor,
+            )
+            
+            res = bt.run(verbose=False)
+        except Exception as e:
+            return -999.0
+            
+        # ============================================================
+        # FITNESS SCORE
+        # ============================================================
+        dr = res['return'].values
+        if len(dr) < 50 or np.std(dr) == 0:
+            return -999.0
+            
+        cum = np.cumprod(1 + dr)
+        peak = np.maximum.accumulate(cum)
+        max_dd = ((cum - peak) / peak).min()
+        
+        if max_dd <= -0.99 or cum[-1] <= 0:
+            return -999.0
+            
+        sharpe = (dr.mean() / dr.std(ddof=1)) * np.sqrt(252)
+        
+        # Sharpe penalized by drawdown - prevents fragile high-Sharpe portfolios.
+        score = sharpe * (1.0 + max_dd) 
+        
+        return score
+
+    # 3. Run the Optimizer
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
     study = optuna.create_study(direction="maximize")
     study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
     
