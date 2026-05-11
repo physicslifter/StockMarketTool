@@ -14,6 +14,7 @@ import random
 #from skfolio.model_selection import CombinatorialPurgedCV
 from clean_analysis import Model
 from pdb import set_trace as st
+import json
 
 #===================
 #Walk forward strategy for model
@@ -23,6 +24,43 @@ import numpy as np
 import re
 import matplotlib.pyplot as plt
 from sklearn.metrics import accuracy_score, roc_auc_score, mean_squared_error
+
+def get_consistent_features(wf_folder, cv_threshold=1.0, mean_threshold=0.005):
+    """Return the list of feature column names that were CONSISTENT across
+    every Model-22 walk-forward fold (same rule used in the analyzer)."""
+    fold_dirs = sorted(
+        d for d in os.listdir(wf_folder)
+        if d.startswith("fold_") and os.path.isdir(os.path.join(wf_folder, d))
+    )
+ 
+    all_imps = []
+    for fold_name in fold_dirs:
+        model_path = os.path.join(wf_folder, fold_name, "model.txt")
+        if not os.path.exists(model_path):
+            continue
+        booster = lgb.Booster(model_file=model_path)
+        imp = dict(zip(
+            booster.feature_name(),
+            booster.feature_importance(importance_type="gain"),
+        ))
+        total = sum(imp.values())
+        if total > 0:
+            imp = {k: v / total for k, v in imp.items()}
+        imp["_fold"] = fold_name
+        all_imps.append(imp)
+ 
+    df = pd.DataFrame(all_imps).set_index("_fold").fillna(0)
+    stats = pd.DataFrame({
+        "mean_importance": df.mean(),
+        "cv": df.std() / (df.mean() + 1e-10),
+    })
+ 
+    consistent = stats[
+        (stats["cv"] < cv_threshold) &
+        (stats["mean_importance"] > mean_threshold)
+    ].sort_values("mean_importance", ascending=False)
+ 
+    return consistent.index.tolist(), consistent
 
 def _save_fold_artifacts(features, target, fold_folder):
     """
@@ -44,7 +82,10 @@ def _save_fold_artifacts(features, target, fold_folder):
 def run_walk_forward_analysis(universe_path, target, features, folder_path,
                               target_type="regression", train_years=4, 
                               val_years=1, test_years=1, n_trials=40,
-                              min_train_years=None):
+                              min_train_years=None, train_months = None,
+                              val_months = None, test_months = None,
+                              min_train_months = None
+                              ):
     """
     Walk-Forward Analysis with two modes:
     
@@ -66,17 +107,25 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
     model.add_target(target, target_type=target_type, save=False)
     model.generate_targets_and_features()
 
+    # --- 1. FLEXIBLE DATE TRANSLATION LOGIC ---
+    t_m = train_months if train_months is not None else int(train_years * 12)
+    v_m = val_months if val_months is not None else int(val_years * 12)
+    test_m = test_months if test_months is not None else int(test_years * 12)
+    
+    min_t_m = None
+    if min_train_months is not None:
+        min_t_m = min_train_months
+    elif min_train_years is not None:
+        min_t_m = int(min_train_years * 12)
+
     global_start_year = model.data['date'].dt.year.min()
     global_end_year = model.data['date'].dt.year.max()
 
-    expanding = min_train_years is not None
+    expanding = min_t_m is not None
+    current_date = pd.to_datetime(f"{global_start_year}-01-01")
     if expanding:
-        print(f"Mode: EXPANDING WINDOW (min_train_years={min_train_years})")
-        current_year = global_start_year
-        first_val_year = global_start_year + min_train_years
-    else:
-        print(f"Mode: SLIDING WINDOW (train_years={train_years})")
-        current_year = global_start_year
+        print(f"Mode: EXPANDING WINDOW (min_train_months={min_t_m})")
+        first_val_date = current_date + pd.DateOffset(months=min_t_m)
 
     all_oos_predictions = []
     metrics_records = []
@@ -84,33 +133,33 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
 
     while True:
         if expanding:
-            train_start = f"{global_start_year}-01-01"
-            val_start_year = first_val_year + (fold - 1) * test_years
-            val_start = f"{val_start_year}-01-01"
-            test_start_year = val_start_year + val_years
-            test_end_year = test_start_year + test_years
-            actual_train_years = val_start_year - global_start_year
+            train_start_dt = pd.to_datetime(f"{global_start_year}-01-01")
+            val_start_dt = first_val_date + pd.DateOffset(months=int((fold - 1) * test_m))
+            actual_train_years = round((val_start_dt - train_start_dt).days / 365.25, 2)
         else:
-            train_start = f"{current_year}-01-01"
-            val_start = f"{current_year + train_years}-01-01"
-            test_start_year = current_year + train_years + val_years
-            test_end_year = test_start_year + test_years
-            actual_train_years = train_years
+            train_start_dt = current_date
+            val_start_dt = current_date + pd.DateOffset(months=t_m)
+            actual_train_years = round(t_m / 12, 2)
 
-        test_start = f"{test_start_year}-01-01"
-        test_end = f"{test_end_year}-01-01"
+        test_start_dt = val_start_dt + pd.DateOffset(months=v_m)
+        test_end_dt = test_start_dt + pd.DateOffset(months=test_m)
 
-        if test_start_year > global_end_year:
+        train_start = train_start_dt.strftime('%Y-%m-%d')
+        val_start = val_start_dt.strftime('%Y-%m-%d')
+        test_start = test_start_dt.strftime('%Y-%m-%d')
+        test_end = test_end_dt.strftime('%Y-%m-%d')
+
+        if test_start_dt.year > global_end_year:
             break
 
         print("\n" + "=" * 60)
         print(f"WALK-FORWARD FOLD {fold}")
         print(f"Train : {train_start} to {val_start} ({actual_train_years} years)")
-        print(f"Val   : {val_start} to {test_start} ({val_years} years)")
+        print(f"Val   : {val_start} to {test_start} ({v_m} months)")
         print(f"Test  : {test_start} to {test_end} ({test_years} years)")
         print("=" * 60)
 
-        fold_folder = os.path.join(folder_path, f"fold_{test_start_year}_{test_end_year}")
+        fold_folder = os.path.join(folder_path, f"fold_{test_start[:7]}_{test_end[:7]}")
         os.makedirs(fold_folder, exist_ok=True)
         model.model_folder = fold_folder
         model.has_folder = True
@@ -126,6 +175,7 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
 
         model.tune_params(n_trials=n_trials)
         model.train_model(show_feature_importance=False)
+        model.evaluate_quantile_spread()
 
         fold_oos_data = model.test_df.copy()
         all_oos_predictions.append(fold_oos_data)
@@ -173,7 +223,7 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
         if expanding:
             fold += 1
         else:
-            current_year += test_years
+            current_date += pd.DateOffset(months=test_m)
             fold += 1
 
     print("\n" + "=" * 60)
@@ -206,6 +256,9 @@ def run_walk_forward_analysis(universe_path, target, features, folder_path,
 
     if len(all_oos_predictions) > 0:
         final_oos_df = pd.concat(all_oos_predictions).sort_values(['date', 'act_symbol'])
+        predictions_csv_path = os.path.join(folder_path, "walk_forward_predictions.csv")
+        final_oos_df.to_csv(predictions_csv_path, index=False)
+        print(f"Predictions saved to: {predictions_csv_path}")
         return final_oos_df, metrics_df
     else:
         return pd.DataFrame(), metrics_df
@@ -668,3 +721,356 @@ class CPCVModel(Model):
         return metrics_df
 
 #=================
+#Analyzing results from walk-forward analysis
+def analyze_feature_importance_across_folds(wf_folder):
+    """
+    Compares feature importance across walk-forward folds.
+    Features that are only important in some folds are candidates for removal.
+    """
+    fold_dirs = sorted([
+        d for d in os.listdir(wf_folder)
+        if d.startswith("fold_") and os.path.isdir(os.path.join(wf_folder, d))
+    ])
+    
+    all_importances = []
+    for fold_name in fold_dirs:
+        model_path = os.path.join(wf_folder, fold_name, "model.txt")
+        if not os.path.exists(model_path):
+            continue
+        
+        lgb_model = lgb.Booster(model_file=model_path)
+        importance = dict(zip(
+            lgb_model.feature_name(),
+            lgb_model.feature_importance(importance_type="gain")
+        ))
+        
+        # Normalize to percentages
+        total = sum(importance.values())
+        if total > 0:
+            importance = {k: v / total for k, v in importance.items()}
+        
+        importance["_fold"] = fold_name
+        all_importances.append(importance)
+    
+    df = pd.DataFrame(all_importances).set_index("_fold").fillna(0)
+    
+    # Statistics per feature
+    stats = pd.DataFrame({
+        "mean_importance": df.mean(),
+        "std_importance": df.std(),
+        "cv": df.std() / (df.mean() + 1e-10),  # coefficient of variation
+        "min_importance": df.min(),
+        "max_importance": df.max(),
+        "n_folds_used": (df > 0).sum(),         # how many folds used this feature at all
+    }).sort_values("mean_importance", ascending=False)
+    
+    print("=" * 70)
+    print("FEATURE IMPORTANCE ANALYSIS")
+    print("=" * 70)
+    
+    # Consistently important (keep)
+    consistent = stats[(stats["cv"] < 1.0) & (stats["mean_importance"] > 0.005)]
+    print(f"\nCONSISTENT features ({len(consistent)}):")
+    print(f"  Low variance across folds, always contribute.")
+    for feat, row in consistent.iterrows():
+        print(f"  {feat:40s}  mean={row['mean_importance']:.4f}  cv={row['cv']:.2f}")
+    
+    # Unstable (candidates for removal)
+    unstable = stats[(stats["cv"] > 2.0) & (stats["mean_importance"] > 0.002)]
+    print(f"\nUNSTABLE features ({len(unstable)}):")
+    print(f"  High variance — important in some folds, irrelevant in others.")
+    for feat, row in unstable.iterrows():
+        print(f"  {feat:40s}  mean={row['mean_importance']:.4f}  cv={row['cv']:.2f}")
+    
+    # Dead weight (remove)
+    dead = stats[stats["mean_importance"] < 0.001]
+    print(f"\nDEAD WEIGHT features ({len(dead)}):")
+    print(f"  Near-zero importance across all folds. Remove.")
+    for feat, row in dead.iterrows():
+        print(f"  {feat:40s}  mean={row['mean_importance']:.6f}  used_in={row['n_folds_used']:.0f}/{len(fold_dirs)} folds")
+    
+    return stats, df
+
+# ----------------------------------------------------------------------------
+# 2. Walk-forward runner that filters `model.data` down to the consistent
+#    feature columns after feature generation. This is a minor variant of
+#    run_walk_forward_analysis; all logic kept identical except the filter.
+# ----------------------------------------------------------------------------
+def run_walk_forward_filtered(
+    universe_path, target, features, folder_path,
+    keep_feature_cols,
+    target_type="regression", train_years=4,
+    val_years=1, test_years=1, n_trials=40,
+    min_train_years=None,
+):
+    os.makedirs(folder_path, exist_ok=True)
+ 
+    model = Model(universe_path)
+    model.add_features(features, save=False)
+    model.add_target(target, target_type=target_type, save=False)
+    model.generate_targets_and_features()
+ 
+    # ----- FILTER STEP -------------------------------------------------------
+    # Keep every non-feature column (dates, symbol, target, etc.) + only the
+    # feature columns in `keep_feature_cols`. `self.features` is re-derived
+    # inside split_data_by_dates() from self.data.keys(), so this propagates
+    # to every fold automatically.
+    feature_cols_in_data = [c for c in model.data.columns if "F" in c.split("_")]
+    drop_cols = [c for c in feature_cols_in_data if c not in set(keep_feature_cols)]
+    missing = [c for c in keep_feature_cols if c not in model.data.columns]
+ 
+    print(f"\n--- Feature Filter ---")
+    print(f"Feature cols generated : {len(feature_cols_in_data)}")
+    print(f"Consistent cols target : {len(keep_feature_cols)}")
+    print(f"Dropping               : {len(drop_cols)}")
+    print(f"Kept                   : {len(feature_cols_in_data) - len(drop_cols)}")
+    if missing:
+        print(f"WARNING — consistent cols missing from generated data ({len(missing)}):")
+        for c in missing:
+            print(f"    {c}")
+ 
+    model.data = model.data.drop(columns=drop_cols)
+    # ------------------------------------------------------------------------
+ 
+    global_start_year = model.data['date'].dt.year.min()
+    global_end_year   = model.data['date'].dt.year.max()
+ 
+    expanding = min_train_years is not None
+    if expanding:
+        print(f"Mode: EXPANDING WINDOW (min_train_years={min_train_years})")
+        first_val_year = global_start_year + min_train_years
+    else:
+        print(f"Mode: SLIDING WINDOW (train_years={train_years})")
+    current_year = global_start_year
+ 
+    all_oos_predictions, metrics_records = [], []
+    fold = 1
+ 
+    while True:
+        if expanding:
+            train_start      = f"{global_start_year}-01-01"
+            val_start_year   = first_val_year + (fold - 1) * test_years
+            val_start        = f"{val_start_year}-01-01"
+            test_start_year  = val_start_year + val_years
+            test_end_year    = test_start_year + test_years
+            actual_train_yrs = val_start_year - global_start_year
+        else:
+            train_start      = f"{current_year}-01-01"
+            val_start        = f"{current_year + train_years}-01-01"
+            test_start_year  = current_year + train_years + val_years
+            test_end_year    = test_start_year + test_years
+            actual_train_yrs = train_years
+ 
+        test_start = f"{test_start_year}-01-01"
+        test_end   = f"{test_end_year}-01-01"
+        if test_start_year > global_end_year:
+            break
+ 
+        print("\n" + "=" * 60)
+        print(f"WALK-FORWARD FOLD {fold}")
+        print(f"Train : {train_start} to {val_start} ({actual_train_yrs} years)")
+        print(f"Val   : {val_start} to {test_start} ({val_years} years)")
+        print(f"Test  : {test_start} to {test_end} ({test_years} years)")
+        print("=" * 60)
+ 
+        fold_folder = os.path.join(folder_path, f"fold_{test_start_year}_{test_end_year}")
+        os.makedirs(fold_folder, exist_ok=True)
+        model.model_folder = fold_folder
+        model.has_folder = True
+ 
+        # Save artifacts (same helper run_walk_forward_analysis uses)
+        _save_fold_artifacts(features, target, fold_folder)
+ 
+        model.params_tuned = False
+        model.split_data_by_dates(train_start, val_start, test_start, test_end)
+ 
+        if model.test_df.empty:
+            print("Test set is empty. Ending Walk-Forward.")
+            break
+ 
+        model.tune_params(n_trials=n_trials)
+        model.train_model(show_feature_importance=False)
+        model.evaluate_quantile_spread()
+ 
+        fold_oos_data = model.test_df.copy()
+        all_oos_predictions.append(fold_oos_data)
+ 
+        fold_metrics = {
+            "Fold": fold,
+            "Train_Start": train_start,
+            "Train_End": val_start,
+            "Train_Years": actual_train_yrs,
+            "Test_Start": test_start,
+            "Test_End": test_end,
+        }
+        if target_type == "classification":
+            preds = fold_oos_data["prob_up"]
+            y_true = model.y_test_bin
+            fold_metrics["Accuracy"] = accuracy_score(y_true, (preds > 0.5).astype(int))
+            fold_metrics["AUC"]      = roc_auc_score(y_true, preds)
+        else:
+            preds = fold_oos_data["pred_return"]
+            y_true = model.y_test_bin
+            fold_metrics["RMSE"]         = np.sqrt(mean_squared_error(y_true, preds))
+            fold_metrics["Dir_Accuracy"] = ((y_true > 0) == (preds > 0)).mean()
+ 
+            mean_ic, std_ic, ic_ir, ann_ic_ir, t_stat = model._calculate_robust_ic_metrics()
+            fold_metrics["Mean_IC"]   = mean_ic
+            fold_metrics["Ann_IC_IR"] = ann_ic_ir
+ 
+            spread_res = model.evaluate_quantile_spread(quantiles=10, plot=False)
+            if spread_res is not None:
+                _, daily_spread = spread_res
+                mean_spread, std_spread = daily_spread.mean(), daily_spread.std()
+                match = re.search(r'_(\d+)', model.target_key)
+                N = int(match.group(1)) if match else 1
+                fold_metrics["Sharpe"] = (
+                    (mean_spread / std_spread) * np.sqrt(252 / N)
+                    if std_spread and not np.isnan(std_spread) else np.nan
+                )
+            else:
+                fold_metrics["Sharpe"] = np.nan
+ 
+        metrics_records.append(fold_metrics)
+ 
+        if expanding:
+            fold += 1
+        else:
+            current_year += test_years
+            fold += 1
+ 
+    print("\n" + "=" * 60)
+    print(f"WALK-FORWARD ANALYSIS COMPLETE ({fold - 1} Folds)")
+ 
+    metrics_df = pd.DataFrame(metrics_records)
+    metrics_csv_path = os.path.join(folder_path, "walk_forward_metrics.csv")
+    metrics_df.to_csv(metrics_csv_path, index=False)
+    print(f"Metrics saved to: {metrics_csv_path}")
+
+    if target_type == "regression" and "Sharpe" in metrics_df.columns:
+        fig, axes = plt.subplots(1, 3, figsize=(16, 4))
+        metrics_df['Sharpe'].plot(kind='bar', ax=axes[0], color='purple', edgecolor='black')
+        axes[0].set_title("OOS Sharpe Ratio per Fold")
+        axes[0].set_xticklabels(metrics_df['Test_Start'].str[:4], rotation=45)
+
+        metrics_df['Mean_IC'].plot(kind='bar', ax=axes[1], color='blue', edgecolor='black')
+        axes[1].set_title("Mean Rank IC per Fold")
+        axes[1].set_xticklabels(metrics_df['Test_Start'].str[:4], rotation=45)
+
+        metrics_df['Ann_IC_IR'].plot(kind='bar', ax=axes[2], color='green', edgecolor='black')
+        axes[2].set_title("Annualized IC-IR per Fold")
+        axes[2].set_xticklabels(metrics_df['Test_Start'].str[:4], rotation=45)
+
+        plt.tight_layout()
+        plot_path = os.path.join(folder_path, "metrics_distribution.png")
+        plt.savefig(plot_path)
+        print(f"Distribution plot saved to: {plot_path}")
+        plt.show()
+
+    if len(all_oos_predictions) > 0:
+        final_oos_df = pd.concat(all_oos_predictions).sort_values(['date', 'act_symbol'])
+        predictions_csv_path = os.path.join(folder_path, "walk_forward_predictions.csv")
+        final_oos_df.to_csv(predictions_csv_path, index=False)
+        print(f"Predictions saved to: {predictions_csv_path}")
+        return final_oos_df, metrics_df
+    else:
+        return pd.DataFrame(), metrics_df
+    
+def train_filtered_single_model(
+    universe_path, target, features, model_folder,
+    keep_feature_cols,
+    train_start, val_start, test_start, test_end,
+    target_type="regression", n_trials=40,
+):
+    """
+    Train a single Model on an explicit date split, restricted to the feature
+    columns in `keep_feature_cols`. Mirrors the filter step from
+    run_walk_forward_filtered so a single-model artifact can be produced
+    without having to pre-select feature objects.
+
+    Writes model.txt, dates.csv, info.csv, features/, target.pkl into 
+    `model_folder` — same on-disk layout the Portfolio loader expects.
+
+    Args:
+        universe_path     : path to universe feather (same as Model)
+        target            : target object
+        features          : FULL list of feature objects (the unfiltered set 
+                            matching the earlier WF model that produced the 
+                            keep_feature_cols list)
+        model_folder      : output folder for all artifacts
+        keep_feature_cols : list of POST-engineering column names to retain 
+                            (e.g. from get_consistent_features)
+        train_start, val_start, test_start, test_end : explicit date strings
+        target_type       : "regression" or "classification"
+        n_trials          : Optuna trials for hyperparameter tuning
+
+    Returns:
+        The trained Model object.
+    """
+    os.makedirs(model_folder, exist_ok=True)
+
+    # 1. Build Model with model_folder set so the standard pipeline auto-writes 
+    #    artifacts (model.txt via train_model, dates.csv via split_data_by_dates, 
+    #    info.csv via train_model, features/ via add_features, target.pkl via 
+    #    add_target).
+    model = Model(universe_path, model_folder=model_folder)
+    model.add_features(features, save=True)
+    model.add_target(target, target_type=target_type, save=True)
+    model.generate_targets_and_features()
+
+    # 2. Filter — identical block to run_walk_forward_filtered.
+    feature_cols_in_data = [c for c in model.data.columns if "F" in c.split("_")]
+    drop_cols = [c for c in feature_cols_in_data if c not in set(keep_feature_cols)]
+    missing   = [c for c in keep_feature_cols if c not in model.data.columns]
+
+    print(f"\n--- Feature Filter ---")
+    print(f"Feature cols generated : {len(feature_cols_in_data)}")
+    print(f"Consistent cols target : {len(keep_feature_cols)}")
+    print(f"Dropping               : {len(drop_cols)}")
+    print(f"Kept                   : {len(feature_cols_in_data) - len(drop_cols)}")
+    if missing:
+        print(f"WARNING — consistent cols missing from generated data ({len(missing)}):")
+        for c in missing:
+            print(f"    {c}")
+
+    model.data = model.data.drop(columns=drop_cols)
+
+    # 3. Split, tune, train. dates.csv, model.txt, info.csv get written to disk
+    #    automatically because has_folder=True.
+    model.split_data_by_dates(train_start, val_start, test_start, test_end)
+    # After generate_targets_and_features() and the column drop
+    print(f"Data date range : {model.data['date'].min().date()} -> {model.data['date'].max().date()}")
+    print(f"Total rows      : {len(model.data)}")
+    print(f"Unique dates    : {model.data['date'].nunique()}")
+    
+    # Then after split_data_by_dates, before the empty check:
+    print(f"Train rows: {len(model.train_df)}  | "
+          f"Val rows: {len(model.val_df)}  | "
+          f"Test rows: {len(model.test_df)}")
+    print(f"Test date range: "
+          f"{model.test_df['date'].min() if not model.test_df.empty else 'EMPTY'} -> "
+          f"{model.test_df['date'].max() if not model.test_df.empty else 'EMPTY'}")
+    if model.test_df.empty:
+        raise Exception(f"Test set empty for {test_start} -> {test_end}.")
+
+    model.tune_params(n_trials=n_trials)
+    model.train_model(show_feature_importance=False)
+
+    # 4. Report the same metrics run_walk_forward_filtered prints per fold so 
+    #    you can compare apples-to-apples to model23.
+    if target_type == "regression":
+        mean_ic, std_ic, ic_ir, ann_ic_ir, t_stat = model._calculate_robust_ic_metrics()
+        print(f"\nMean IC       : {mean_ic:.4f}")
+        print(f"Annualized IR : {ann_ic_ir:.4f}")
+
+        spread_res = model.evaluate_quantile_spread(quantiles=10, plot=False)
+        if spread_res is not None:
+            _, daily_spread = spread_res
+            mean_spread, std_spread = daily_spread.mean(), daily_spread.std()
+            match = re.search(r'_(\d+)', model.target_key)
+            N = int(match.group(1)) if match else 1
+            sharpe = ((mean_spread / std_spread) * np.sqrt(252 / N)
+                      if std_spread and not np.isnan(std_spread) else np.nan)
+            print(f"Top-Bot Sharpe: {sharpe:.4f}")
+
+    return model
