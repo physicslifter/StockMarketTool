@@ -40,6 +40,7 @@ test_gap_sigma = 0
 test_sharpe_target = 0
 test_cross_sectional_z = 0
 test_rate_features = 1
+test_cross_sectional_features = 0
 
 #testing the model
 test_model = 0
@@ -1332,9 +1333,9 @@ if test_rate_features == True:
     test_df = engine.compute(test_df)
     
     # 3. Define Expected Column Names based on the RateFeatureRequest logic
-    col_spread = 'RATE_SPR_10_year_2_year'
-    col_fly = 'RATE_FLY_10_year_2_year_3_month'
-    col_vel = 'RATE_VEL_10_year_5d'
+    col_spread = 'RATE_SPR_10_year_2_year_F'
+    col_fly = 'RATE_FLY_10_year_2_year_3_month_F'
+    col_vel = 'RATE_VEL_10_year_5d_F'
     
     # We need to temporarily merge the raw rates just to plot them side-by-side
     raw_rates = pd.read_csv("../Data/treasury_rates.csv")
@@ -1399,3 +1400,177 @@ if test_rate_features == True:
     
     plt.tight_layout()
     plt.show()
+
+if test_cross_sectional_features == True:
+    print("--- Starting Cross-Sectional & Macro-Derived Feature Test ---")
+
+    # Load full universe (breadth needs multiple stocks)
+    df = pd.read_feather("../Data/Universes/7.feather")
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Define requests
+    cs_requests = [
+        FeatureRequest("VIX_ZSCORE", shift=-1, params={"timeperiod": 20}, input_type="raw", alias="vix_zscore"),
+        FeatureRequest("DIFFUSION", shift=-1, params={"timeperiod": 21}, input_type="raw", alias="diffusion_21"),
+        FeatureRequest("DIFFUSION", shift=-1, params={"timeperiod": 63}, input_type="raw", alias="diffusion_63"),
+        FeatureRequest("AD_SPREAD", shift=-1, params={"timeperiod": 5}, input_type="raw", alias="ad_spread"),
+        FeatureRequest("CS_DISPERSION", shift=-1, params={"timeperiod": 21}, input_type="raw", alias="cs_dispersion"),
+        FeatureRequest("HERFINDAHL", shift=-1, params={"timeperiod": 21}, input_type="raw", alias="herfindahl"),
+    ]
+
+    engine = FeatureEngine(cs_requests)
+    result_df = engine.compute(df)
+
+    # Extract one row per date (these are market-wide features, same for all stocks)
+    col_vix_z = [c for c in result_df.columns if "vix_zscore" in c.lower()][0]
+    col_diff_21 = [c for c in result_df.columns if "diffusion_21" in c.lower()][0]
+    col_diff_63 = [c for c in result_df.columns if "diffusion_63" in c.lower()][0]
+    col_ad = [c for c in result_df.columns if "ad_spread" in c.lower()][0]
+    col_disp = [c for c in result_df.columns if "cs_dispersion" in c.lower()][0]
+    col_herf = [c for c in result_df.columns if "herfindahl" in c.lower()][0]
+
+    feature_cols = [col_vix_z, col_diff_21, col_diff_63, col_ad, col_disp, col_herf]
+    daily = result_df.groupby("date")[feature_cols].first().sort_index()
+
+    print(f"\nDetected columns: {feature_cols}")
+    print(f"Date range: {daily.index.min().date()} to {daily.index.max().date()}")
+    print(f"\nNaN counts:")
+    for col in feature_cols:
+        n_nan = daily[col].isna().sum()
+        n_total = len(daily)
+        print(f"  {col}: {n_nan}/{n_total} ({n_nan/n_total:.1%})")
+
+    # ── Assertions ──
+    print("\nRunning Assertions...")
+
+    warmup = 70
+    post_warmup = daily.iloc[warmup:]
+
+    for col in feature_cols:
+        nan_pct = post_warmup[col].isna().mean()
+        threshold = 0.10 if "herfindahl" in col.lower() else 0.05
+        assert nan_pct < threshold, f"Error: {col} has {nan_pct:.1%} NaNs after warmup (expected < {threshold:.0%})"
+
+    for col in [col_diff_21, col_diff_63]:
+        valid = daily[col].dropna()
+        assert valid.min() >= 0, f"Error: {col} has values below 0"
+        assert valid.max() <= 1, f"Error: {col} has values above 1"
+
+    valid_ad = daily[col_ad].dropna()
+    assert valid_ad.min() >= -1, f"Error: {col_ad} has values below -1"
+    assert valid_ad.max() <= 1, f"Error: {col_ad} has values above 1"
+
+    assert daily[col_disp].dropna().min() >= 0, f"Error: {col_disp} has negative values"
+    assert daily[col_herf].dropna().min() >= 0, f"Error: {col_herf} has negative values"
+
+    print("✅ All assertions passed!")
+
+    # ── Plots (3 rows x 2 columns) ──
+    print("\nGenerating Plots...")
+    fig, axes = plt.subplots(3, 2, figsize=(18, 10), sharex=True)
+
+    # Row 1, Left: VIX Z-Score
+    axes[0, 0].plot(daily.index, daily[col_vix_z], color="firebrick", linewidth=1)
+    axes[0, 0].axhline(0, color="black", linestyle="--", alpha=0.5)
+    axes[0, 0].axhline(2, color="red", linestyle=":", alpha=0.5, label="z=2")
+    axes[0, 0].axhline(-2, color="green", linestyle=":", alpha=0.5, label="z=-2")
+    axes[0, 0].set_title("VIX Z-Score (20d)")
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # Row 1, Right: Diffusion Index
+    axes[0, 1].plot(daily.index, daily[col_diff_21], color="blue", linewidth=1, label="21d")
+    axes[0, 1].plot(daily.index, daily[col_diff_63], color="navy", linewidth=1, alpha=0.7, label="63d")
+    axes[0, 1].axhline(0.5, color="black", linestyle="--", alpha=0.5)
+    axes[0, 1].axhline(0.7, color="green", linestyle=":", alpha=0.3, label="70% (broad rally)")
+    axes[0, 1].axhline(0.3, color="red", linestyle=":", alpha=0.3, label="30% (broad selloff)")
+    axes[0, 1].set_title("Diffusion Index")
+    axes[0, 1].legend(fontsize=8)
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # Row 2, Left: Advance-Decline Spread
+    axes[1, 0].plot(daily.index, daily[col_ad], color="purple", linewidth=1)
+    axes[1, 0].axhline(0, color="black", linestyle="--", alpha=0.5)
+    axes[1, 0].set_title("Advance-Decline Spread (5d)")
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # Row 2, Right: Dispersion
+    axes[1, 1].plot(daily.index, daily[col_disp], color="teal", linewidth=1)
+    axes[1, 1].set_title("Cross-Sectional Dispersion (21d)")
+    axes[1, 1].grid(True, alpha=0.3)
+
+    # Row 3, Left: Herfindahl
+    axes[2, 0].plot(daily.index, daily[col_herf], color="darkorange", linewidth=1)
+    axes[2, 0].set_title("Herfindahl Concentration (21d)")
+    axes[2, 0].grid(True, alpha=0.3)
+
+    # Row 3, Right: Diffusion Divergence
+    diff_spread = daily[col_diff_21] - daily[col_diff_63]
+    axes[2, 1].fill_between(daily.index, diff_spread, 0,
+                            where=diff_spread >= 0, color="green", alpha=0.4, label="Short > Long")
+    axes[2, 1].fill_between(daily.index, diff_spread, 0,
+                            where=diff_spread < 0, color="red", alpha=0.4, label="Short < Long")
+    axes[2, 1].axhline(0, color="black", linewidth=1)
+    axes[2, 1].set_title("Breadth Divergence (21d - 63d)")
+    axes[2, 1].legend(fontsize=8)
+    axes[2, 1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+
+    #print a test to the terminal before showing the plot
+    # ── Manual Verification ──
+    print("\n--- Manual Spot-Check ---")
+    
+    # Pick a date well past warmup
+    check_date = daily.index[200]
+    print(f"Checking date: {check_date.date()}")
+    
+    # Get raw data for this date and surrounding window
+    raw_df = df.sort_values(["act_symbol", "date"])
+    
+    # 1. DIFFUSION (21d): manually compute % of stocks with positive 21-day log return
+    date_mask = raw_df["date"] == check_date
+    date_df = raw_df[date_mask]
+    
+    positive_count = 0
+    total_count = 0
+    for ticker in date_df["act_symbol"].unique():
+        ticker_data = raw_df[raw_df["act_symbol"] == ticker].set_index("date")["close"]
+        if check_date in ticker_data.index:
+            current = ticker_data.loc[check_date]
+            # Find price 21 trading days ago
+            past_prices = ticker_data[ticker_data.index < check_date].tail(21)
+            if len(past_prices) >= 21:
+                past_price = past_prices.iloc[0]
+                log_ret = np.log(current / past_price)
+                total_count += 1
+                if log_ret > 0:
+                    positive_count += 1
+    
+    manual_diffusion = positive_count / total_count if total_count > 0 else np.nan
+    engine_diffusion = daily.loc[check_date, col_diff_21]
+    diff_err = abs(manual_diffusion - engine_diffusion)
+    print(f"  Diffusion 21d:  manual={manual_diffusion:.6f}  engine={engine_diffusion:.6f}  diff={diff_err:.6f}")
+    assert diff_err < 0.01, f"Diffusion mismatch: {diff_err:.6f}"
+    
+    # 2. AD_SPREAD: manually compute (advances - declines) / total for that date
+    daily_rets = []
+    for ticker in date_df["act_symbol"].unique():
+        ticker_data = raw_df[raw_df["act_symbol"] == ticker].set_index("date")["close"]
+        if check_date in ticker_data.index:
+            prev_prices = ticker_data[ticker_data.index < check_date].tail(1)
+            if len(prev_prices) == 1:
+                log_ret = np.log(ticker_data.loc[check_date] / prev_prices.iloc[0])
+                daily_rets.append(log_ret)
+    
+    advances = sum(1 for r in daily_rets if r > 0)
+    declines = sum(1 for r in daily_rets if r < 0)
+    raw_ad = (advances - declines) / len(daily_rets) if daily_rets else np.nan
+    print(f"  AD raw (1 day): advances={advances}  declines={declines}  total={len(daily_rets)}  ratio={raw_ad:.6f}")
+    print(f"  (AD_SPREAD is 5d smoothed, so exact match not expected — just sanity check sign & magnitude)")
+    
+    # 3. CS_DISPERSION: manually compute cross-sectional std of returns for that date
+    manual_disp = np.std(daily_rets, ddof=1) if len(daily_rets) > 1 else np.nan
+
+    plt.show()
+
