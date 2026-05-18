@@ -154,6 +154,168 @@ class Portfolio:
         info_df.to_csv(f"{folder}/info.csv")
         self.data.to_feather(f"{folder}/predictions.feather")
 
+    def decile_analysis(self, start_date=None, end_date=None,
+                    horizon=1, quantiles=10, plot=True,
+                    include_gap=True, price_col="open"):
+        """
+        Decile analysis on portfolio predictions over a specified date range.
+    
+        For each date, ranks stocks into `quantiles` buckets by pred_return and 
+        computes mean realized forward return per bucket. The forward return is 
+        computed from price data, independent of the model's training target.
+    
+        Args:
+            start_date  : start of analysis (inclusive). None = earliest in data.
+            end_date    : end of analysis (inclusive). None = latest in data.
+            horizon     : forward return horizon in trading days. 1 = next-day.
+                         Set to your holding period (e.g., 5 for a 5-day 
+                         rebalance) to evaluate at the natural strategy horizon.
+            quantiles   : number of buckets (10 = deciles).
+            plot        : show diagnostic plots.
+            include_gap : include extrapolated (gap) predictions. False for 
+                         validated-only.
+            price_col   : 'open' for open-to-open (matches open-execution 
+                         backtest) or 'close' for close-to-close.
+    
+        Returns:
+            dict with decile_means, spread, spread_sharpe, rank_ic_mean,
+            rank_ic_ir, daily_returns, n_obs, horizon.
+        """
+        if not self.has_data:
+            raise Exception("No data. Call get_model_data() first.")
+    
+        df = self.data.copy()
+    
+        # --- Compute forward returns from price data ---------------------------
+        if price_col not in df.columns:
+            raise Exception(
+                f"Price column '{price_col}' not in self.data. "
+                f"Available: {sorted(df.columns)}"
+            )
+        df = df.sort_values(["act_symbol", "date"])
+        df["fwd_ret"] = df.groupby("act_symbol")[price_col].transform(
+            lambda x: np.log(x.shift(-horizon) / x)
+        )
+    
+        # --- Filter on gap policy and date range -------------------------------
+        if not include_gap and "is_gap" in df.columns:
+            df = df[~df["is_gap"]]
+        if start_date is not None:
+            df = df[df["date"] >= pd.to_datetime(start_date)]
+        if end_date is not None:
+            df = df[df["date"] <= pd.to_datetime(end_date)]
+    
+        df = df.dropna(subset=["pred_return", "fwd_ret"])
+        if df.empty:
+            raise Exception(
+                "No valid rows after filtering. Most likely the horizon shift "
+                "exceeded the data tail, or the date range is outside what's loaded."
+            )
+    
+        # --- Assign deciles per date -------------------------------------------
+        def _assign(g):
+            if len(g) < quantiles:
+                return pd.Series(np.nan, index=g.index)
+            try:
+                return pd.qcut(g["pred_return"], q=quantiles, labels=False,
+                               duplicates="drop")
+            except ValueError:
+                return pd.Series(np.nan, index=g.index)
+    
+        df["decile"] = df.groupby("date", group_keys=False).apply(_assign)
+        df = df.dropna(subset=["decile"])
+        df["decile"] = df["decile"].astype(int)
+        if df.empty:
+            raise Exception(
+                f"No dates with >={quantiles} stocks for quantile assignment."
+            )
+    
+        # --- Aggregate ---------------------------------------------------------
+        daily_returns = df.groupby(["date", "decile"])["fwd_ret"].mean().unstack()
+        top, bot = daily_returns.columns.max(), daily_returns.columns.min()
+        spread   = (daily_returns[top] - daily_returns[bot]).dropna()
+        decile_means = daily_returns.mean()
+    
+        # Annualization: sqrt(252) for 1-day non-overlapping, sqrt(252/h) for
+        # h-day overlapping. h-day returns at daily frequency overlap, which 
+        # inflates apparent sample size; sqrt(252/h) is the correct correction.
+        ann_factor = np.sqrt(252 / horizon)
+    
+        spread_mean   = spread.mean()
+        spread_std    = spread.std()
+        spread_sharpe = (spread_mean / spread_std) * ann_factor if spread_std > 0 else np.nan
+    
+        # --- Rank IC (Spearman) -------------------------------------------------
+        daily_ic = df.groupby("date").apply(
+            lambda g: g["pred_return"].corr(g["fwd_ret"], method="spearman")
+        ).dropna()
+        rank_ic_mean = daily_ic.mean()
+        rank_ic_std  = daily_ic.std()
+        rank_ic_ir   = (rank_ic_mean / rank_ic_std) * ann_factor if rank_ic_std > 0 else np.nan
+    
+        # --- Report -------------------------------------------------------------
+        print(f"\n--- Decile Analysis ---")
+        print(f"Period          : {df['date'].min().date()} -> {df['date'].max().date()}")
+        print(f"Trading days    : {df['date'].nunique()}")
+        print(f"Observations    : {len(df)}")
+        print(f"Horizon         : {horizon} day(s), price_col={price_col}")
+        print(f"Include gap     : {include_gap}")
+        print(f"Rank IC (mean)  : {rank_ic_mean:.4f}")
+        print(f"Rank IC (IR)    : {rank_ic_ir:.4f}")
+        print(f"Spread mean     : {spread_mean:.6f}")
+        print(f"Spread Sharpe   : {spread_sharpe:.4f}")
+        print("\nMean return by decile:")
+        for d, r in decile_means.items():
+            bar = "#" * max(0, int(r * 5000)) if r > 0 else ""
+            neg = "-" * max(0, int(-r * 5000)) if r < 0 else ""
+            print(f"  D{int(d)}: {r:>+10.6f}  {neg}{bar}")
+    
+        # --- Plot --------------------------------------------------------------
+        if plot:
+            import matplotlib.pyplot as plt
+            fig, axes = plt.subplots(1, 3, figsize=(18, 4.5))
+    
+            colors = ["red" if r < 0 else "green" for r in decile_means.values]
+            axes[0].bar(decile_means.index.astype(int), decile_means.values, color=colors)
+            axes[0].axhline(0, color="black", linewidth=0.5)
+            axes[0].set_xlabel(f"Decile (0=lowest pred, {quantiles-1}=highest pred)")
+            axes[0].set_ylabel(f"Mean {horizon}-day forward log return")
+            axes[0].set_title(f"Mean Realized Return by Decile (IC={rank_ic_mean:.3f})")
+    
+            cum_spread = spread.cumsum()
+            axes[1].plot(cum_spread.index, cum_spread.values, color="steelblue")
+            axes[1].axhline(0, color="black", linewidth=0.5)
+            axes[1].set_xlabel("Date")
+            axes[1].set_ylabel("Cumulative Spread Return")
+            axes[1].set_title(f"Top - Bottom Decile Spread (Sharpe={spread_sharpe:.2f})")
+    
+            cum_decile = daily_returns.cumsum()
+            cmap = plt.cm.RdYlGn
+            n = len(cum_decile.columns)
+            for idx, d in enumerate(cum_decile.columns):
+                axes[2].plot(cum_decile.index, cum_decile[d],
+                             label=f"D{int(d)}", color=cmap(idx / max(1, n - 1)),
+                             alpha=0.85)
+            axes[2].axhline(0, color="black", linewidth=0.5)
+            axes[2].set_xlabel("Date")
+            axes[2].set_ylabel("Cumulative Return")
+            axes[2].set_title("Cumulative Return by Decile")
+            axes[2].legend(loc="best", fontsize=8, ncol=2)
+    
+            plt.tight_layout()
+            plt.show()
+    
+        return {
+            "decile_means":   decile_means,
+            "spread":         spread,
+            "spread_sharpe":  spread_sharpe,
+            "rank_ic_mean":   rank_ic_mean,
+            "rank_ic_ir":     rank_ic_ir,
+            "daily_returns":  daily_returns,
+            "n_obs":          len(df),
+            "horizon":        horizon,
+        }
+
 class WalkForwardPortfolio:
     def __init__(self):
         self.has_data = False
@@ -410,6 +572,168 @@ class WalkForwardPortfolio:
               f"{self.data['date'].nunique()} dates | "
               f"{self.data['act_symbol'].nunique()} stocks | "
               f"{self.data['date'].min().date()} -> {self.data['date'].max().date()}")
+        
+    def decile_analysis(self, start_date=None, end_date=None,
+                    horizon=1, quantiles=10, plot=True,
+                    include_gap=True, price_col="open"):
+        """
+        Decile analysis on portfolio predictions over a specified date range.
+
+        For each date, ranks stocks into `quantiles` buckets by pred_return and 
+        computes mean realized forward return per bucket. The forward return is 
+        computed from price data, independent of the model's training target.
+
+        Args:
+            start_date  : start of analysis (inclusive). None = earliest in data.
+            end_date    : end of analysis (inclusive). None = latest in data.
+            horizon     : forward return horizon in trading days. 1 = next-day.
+                         Set to your holding period (e.g., 5 for a 5-day 
+                         rebalance) to evaluate at the natural strategy horizon.
+            quantiles   : number of buckets (10 = deciles).
+            plot        : show diagnostic plots.
+            include_gap : include extrapolated (gap) predictions. False for 
+                         validated-only.
+            price_col   : 'open' for open-to-open (matches open-execution 
+                         backtest) or 'close' for close-to-close.
+
+        Returns:
+            dict with decile_means, spread, spread_sharpe, rank_ic_mean,
+            rank_ic_ir, daily_returns, n_obs, horizon.
+        """
+        if not self.has_data:
+            raise Exception("No data. Call get_model_data() first.")
+
+        df = self.data.copy()
+
+        # --- Compute forward returns from price data ---------------------------
+        if price_col not in df.columns:
+            raise Exception(
+                f"Price column '{price_col}' not in self.data. "
+                f"Available: {sorted(df.columns)}"
+            )
+        df = df.sort_values(["act_symbol", "date"])
+        df["fwd_ret"] = df.groupby("act_symbol")[price_col].transform(
+            lambda x: np.log(x.shift(-horizon) / x)
+        )
+
+        # --- Filter on gap policy and date range -------------------------------
+        if not include_gap and "is_gap" in df.columns:
+            df = df[~df["is_gap"]]
+        if start_date is not None:
+            df = df[df["date"] >= pd.to_datetime(start_date)]
+        if end_date is not None:
+            df = df[df["date"] <= pd.to_datetime(end_date)]
+
+        df = df.dropna(subset=["pred_return", "fwd_ret"])
+        if df.empty:
+            raise Exception(
+                "No valid rows after filtering. Most likely the horizon shift "
+                "exceeded the data tail, or the date range is outside what's loaded."
+            )
+
+        # --- Assign deciles per date -------------------------------------------
+        def _assign(g):
+            if len(g) < quantiles:
+                return pd.Series(np.nan, index=g.index)
+            try:
+                return pd.qcut(g["pred_return"], q=quantiles, labels=False,
+                               duplicates="drop")
+            except ValueError:
+                return pd.Series(np.nan, index=g.index)
+
+        df["decile"] = df.groupby("date", group_keys=False).apply(_assign)
+        df = df.dropna(subset=["decile"])
+        df["decile"] = df["decile"].astype(int)
+        if df.empty:
+            raise Exception(
+                f"No dates with >={quantiles} stocks for quantile assignment."
+            )
+
+        # --- Aggregate ---------------------------------------------------------
+        daily_returns = df.groupby(["date", "decile"])["fwd_ret"].mean().unstack()
+        top, bot = daily_returns.columns.max(), daily_returns.columns.min()
+        spread   = (daily_returns[top] - daily_returns[bot]).dropna()
+        decile_means = daily_returns.mean()
+
+        # Annualization: sqrt(252) for 1-day non-overlapping, sqrt(252/h) for
+        # h-day overlapping. h-day returns at daily frequency overlap, which 
+        # inflates apparent sample size; sqrt(252/h) is the correct correction.
+        ann_factor = np.sqrt(252 / horizon)
+
+        spread_mean   = spread.mean()
+        spread_std    = spread.std()
+        spread_sharpe = (spread_mean / spread_std) * ann_factor if spread_std > 0 else np.nan
+
+        # --- Rank IC (Spearman) -------------------------------------------------
+        daily_ic = df.groupby("date").apply(
+            lambda g: g["pred_return"].corr(g["fwd_ret"], method="spearman")
+        ).dropna()
+        rank_ic_mean = daily_ic.mean()
+        rank_ic_std  = daily_ic.std()
+        rank_ic_ir   = (rank_ic_mean / rank_ic_std) * ann_factor if rank_ic_std > 0 else np.nan
+
+        # --- Report -------------------------------------------------------------
+        print(f"\n--- Decile Analysis ---")
+        print(f"Period          : {df['date'].min().date()} -> {df['date'].max().date()}")
+        print(f"Trading days    : {df['date'].nunique()}")
+        print(f"Observations    : {len(df)}")
+        print(f"Horizon         : {horizon} day(s), price_col={price_col}")
+        print(f"Include gap     : {include_gap}")
+        print(f"Rank IC (mean)  : {rank_ic_mean:.4f}")
+        print(f"Rank IC (IR)    : {rank_ic_ir:.4f}")
+        print(f"Spread mean     : {spread_mean:.6f}")
+        print(f"Spread Sharpe   : {spread_sharpe:.4f}")
+        print("\nMean return by decile:")
+        for d, r in decile_means.items():
+            bar = "#" * max(0, int(r * 5000)) if r > 0 else ""
+            neg = "-" * max(0, int(-r * 5000)) if r < 0 else ""
+            print(f"  D{int(d)}: {r:>+10.6f}  {neg}{bar}")
+
+        # --- Plot --------------------------------------------------------------
+        if plot:
+            import matplotlib.pyplot as plt
+            fig, axes = plt.subplots(1, 3, figsize=(18, 4.5))
+
+            colors = ["red" if r < 0 else "green" for r in decile_means.values]
+            axes[0].bar(decile_means.index.astype(int), decile_means.values, color=colors)
+            axes[0].axhline(0, color="black", linewidth=0.5)
+            axes[0].set_xlabel(f"Decile (0=lowest pred, {quantiles-1}=highest pred)")
+            axes[0].set_ylabel(f"Mean {horizon}-day forward log return")
+            axes[0].set_title(f"Mean Realized Return by Decile (IC={rank_ic_mean:.3f})")
+
+            cum_spread = spread.cumsum()
+            axes[1].plot(cum_spread.index, cum_spread.values, color="steelblue")
+            axes[1].axhline(0, color="black", linewidth=0.5)
+            axes[1].set_xlabel("Date")
+            axes[1].set_ylabel("Cumulative Spread Return")
+            axes[1].set_title(f"Top - Bottom Decile Spread (Sharpe={spread_sharpe:.2f})")
+
+            cum_decile = daily_returns.cumsum()
+            cmap = plt.cm.RdYlGn
+            n = len(cum_decile.columns)
+            for idx, d in enumerate(cum_decile.columns):
+                axes[2].plot(cum_decile.index, cum_decile[d],
+                             label=f"D{int(d)}", color=cmap(idx / max(1, n - 1)),
+                             alpha=0.85)
+            axes[2].axhline(0, color="black", linewidth=0.5)
+            axes[2].set_xlabel("Date")
+            axes[2].set_ylabel("Cumulative Return")
+            axes[2].set_title("Cumulative Return by Decile")
+            axes[2].legend(loc="best", fontsize=8, ncol=2)
+
+            plt.tight_layout()
+            plt.show()
+
+        return {
+            "decile_means":   decile_means,
+            "spread":         spread,
+            "spread_sharpe":  spread_sharpe,
+            "rank_ic_mean":   rank_ic_mean,
+            "rank_ic_ir":     rank_ic_ir,
+            "daily_returns":  daily_returns,
+            "n_obs":          len(df),
+            "horizon":        horizon,
+        }
 
 class BacktestRule:
     def __init__(self, feature, threshold, direction:str = "above"):
@@ -1416,7 +1740,7 @@ class HRPBacktest:
             self.nav_history.append(total_nav)
             
             # Use a 252-day rolling peak (1 year)
-            rolling_peak = max(self.nav_history[-252:]) 
+            rolling_peak = max(self.nav_history[-60:]) 
             current_dd = (total_nav / rolling_peak) - 1.0 if rolling_peak > 0 else 0.0
             
             if self.use_dynamic_scaling and day_idx > max(self.vol_lookback, self.ic_lookback):
