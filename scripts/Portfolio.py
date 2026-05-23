@@ -2348,7 +2348,7 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
         # ============================================================
         # STRUCTURAL PARAMETERS
         # ============================================================
-        n_pos             = trial.suggest_int("n_positions", 2, 20, step=1)
+        n_pos             = trial.suggest_int("n_positions", 2, 30, step=2)
         rebalance_days    = trial.suggest_int("rebalance_days", 1, 5)
         holding_period    = 5 #trial.suggest_int("holding_period", 1, 10)
         hrp_lookback      = trial.suggest_int("hrp_lookback", 30, 150, step=30)
@@ -2365,7 +2365,7 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
         # ============================================================
         
         # Volatility scaling (always on - it's the baseline risk control)
-        target_vol        = trial.suggest_float("target_vol", 0.04, 0.20, step=0.02)
+        target_vol        = trial.suggest_float("target_vol", 0.01, 0.20, step=0.01)
         vol_lookback      = trial.suggest_int("vol_lookback", 10, 130, step=10)
         max_vol_leverage  = 1 #trial.suggest_float("max_vol_leverage", 1.0, 2.0, step=0.25)
         
