@@ -131,7 +131,7 @@ class Portfolio:
         self.model.data["daily_log_ret"] = self.model.data["daily_log_ret"].fillna(0)
 
         keep_cols = ["date", "act_symbol", "pred_return", "pred_zscore", 
-                     "daily_log_ret", "open", "close"]
+                     "daily_log_ret", "open", "close", "high", "low"]
 
         target_cols = [k for k in self.model.data.columns if "T" in k.split("_")]
         keep_cols += target_cols
@@ -491,7 +491,7 @@ class WalkForwardPortfolio:
         combined   = combined[~(combined["is_gap"] & combined["date"].isin(real_dates))]
 
         keep_cols = ["date", "act_symbol", "pred_return", "pred_zscore", "fold", "is_gap"]
-        for col in ["open", "close", "fwd_log_ret"]:
+        for col in ["open", "close", "fwd_log_ret", "high", "low"]:
             if col in combined.columns:
                 keep_cols.append(col)
         target_cols = [k for k in combined.columns if "T" in k.split("_")]
@@ -1577,7 +1577,7 @@ class HRPBacktest:
     def __init__(self, portfolio, n_longs=20, n_shorts=20, holding_period=5, 
                  rebalance_days=1, cost_bps=5.0, hrp_lookback=60, 
                  smooth_predictions=False, buffer_multiplier=1.0, initial_capital=2000.0,
-                 sizing_method = "dollar_neutral"):
+                 sizing_method = "dollar_neutral", volatility_type:str = "simple"):
         
         if not portfolio.has_data:
             raise Exception("Portfolio has no data. Run get_model_data() first.")
@@ -1599,6 +1599,10 @@ class HRPBacktest:
 
         self.num_tranches = max(1, int(self.holding_period / self.rebalance_days))
 
+        if volatility_type not in ["simple", "yang_zhang", "ewma"]:
+            raise ValueError("volatility_type must be 'simple' or 'yang_zhang'")
+        self.volatility_type = volatility_type
+
         if "close" not in self.data.columns:
             raise Exception("Portfolio data must contain 'close' column.")
 
@@ -1610,20 +1614,77 @@ class HRPBacktest:
         if "open" not in self.data.columns:
             raise Exception("Portfolio data must contain 'open' column for open-execution backtest.")
 
-        self.price_history = self.data.pivot_table(
-            index="date", columns="act_symbol", values="open"
-        ).ffill()
+        # =====================================================================
+        # CONTIGUOUS HISTORICAL DATA FETCH 
+        # (Solves the "New Stock in Universe" missing history problem)
+        # =====================================================================
+        print("Fetching contiguous historical OHLCV data for warm-up periods...")
+        
+        # Find exactly what stocks we need and how far back we must look
+        all_symbols = self.data['act_symbol'].unique().tolist()
+        lookback_days = max(self.hrp_lookback, 60) + 30 
+        min_date = self.data['date'].min() - pd.Timedelta(days=lookback_days)
+        max_date = self.data['date'].max()
 
-        # Pre-compute a clean returns matrix purely for the HRP correlation algorithm
+        import pyarrow.dataset as ds
+        dataset = ds.dataset("../Data/all_ohlcv.feather", format="feather")
+        filter_cond = (ds.field('act_symbol').isin(all_symbols)) & \
+                      (ds.field('date') >= min_date) & \
+                      (ds.field('date') <= max_date)
+        
+        raw_ohlcv = dataset.to_table(filter=filter_cond).to_pandas()
+        raw_ohlcv['date'] = pd.to_datetime(raw_ohlcv['date'])
+
+        # 1. Build master price history (Open prices for execution and MTM)
+        self.price_history = raw_ohlcv.pivot_table(index="date", columns="act_symbol", values="open").ffill()
         self.returns_pivot = self.price_history.pct_change().clip(lower=-0.75, upper=1.0).fillna(0)
 
+        # 2. Build Beta Matrix (if needed)
         if self.sizing_method == "beta_neutral":
             print("Pre-computing 60-day rolling Beta for Beta-Neutral sizing...")
-            mkt_ret = self.returns_pivot.mean(axis=1) # Market proxy
+            mkt_ret = self.returns_pivot.mean(axis=1) 
             mkt_var = mkt_ret.rolling(60, min_periods=20).var()
             rolling_cov = self.returns_pivot.rolling(60, min_periods=20).cov(mkt_ret)
-            self.beta_pivot = rolling_cov.div(mkt_var, axis=0)
-            self.beta_pivot = self.beta_pivot.ffill().fillna(1.0).clip(0.1, 3.0)
+            self.beta_pivot = rolling_cov.div(mkt_var, axis=0).ffill().fillna(1.0).clip(0.1, 3.0)
+
+        # 3. Build Vectorized Yang-Zhang/EWMA Volatility Panels
+        self.yz_vol_panel = None
+        self.ewma_vol_panel = None
+        
+        if self.volatility_type == "yang_zhang":
+            if all(c in raw_ohlcv.columns for c in ["open", "high", "low", "close"]):
+                print("Pre-computing Vectorized Yang-Zhang Volatility panel...")
+                df_O = self.price_history
+                df_H = raw_ohlcv.pivot_table(index="date", columns="act_symbol", values="high").ffill()
+                df_L = raw_ohlcv.pivot_table(index="date", columns="act_symbol", values="low").ffill()
+                df_C = raw_ohlcv.pivot_table(index="date", columns="act_symbol", values="close").ffill()
+                
+                log_ho = np.log(df_H / df_O)
+                log_lo = np.log(df_L / df_O)
+                log_co = np.log(df_C / df_O)
+                log_oc = np.log(df_O / df_C.shift(1))
+                
+                rs_var = (log_ho * (log_ho - log_co)) + (log_lo * (log_lo - log_co))
+                
+                window = 20
+                overnight_var = log_oc.rolling(window=window).var()
+                open_close_var = log_co.rolling(window=window).var()
+                rs_var_rolling = rs_var.rolling(window=window).mean()
+                
+                k = 0.34 / (1.34 + (window + 1) / (window - 1))
+                yz_var = overnight_var + (k * open_close_var) + ((1 - k) * rs_var_rolling)
+                self.yz_vol_panel = np.sqrt(yz_var * 252)
+            else:
+                print("WARNING: Missing OHLC data. Falling back to 'simple' volatility.")
+                self.volatility_type = "simple"
+                
+        elif self.volatility_type == "ewma":
+            print("Pre-computing Vectorized EWMA Volatility panel...")
+            # We use the clean, clipped returns_pivot we already built for HRP
+            # span=20 applies a half-life roughly equivalent to a 20-day SMA, but with exponential decay
+            ewma_var = self.returns_pivot.ewm(span=20, min_periods=10).var()
+            self.ewma_vol_panel = np.sqrt(ewma_var * 252)
+        # =====================================================================
 
         # Apply optional smoothing
         if self.smooth_predictions:
@@ -1755,14 +1816,45 @@ class HRPBacktest:
                 
                 # 2. VOLATILITY SCALING
                 # Use daily_rets list (which contains up to yesterday's return)
-                recent_rets = daily_rets[-self.vol_lookback:]
-                realized_vol = np.std(recent_rets) * np.sqrt(252)
-                
-                if realized_vol > 0:
-                    vol_scalar = self.target_vol / realized_vol
-                    vol_scalar = min(self.max_vol_leverage, vol_scalar) # Cap leverage
+                # 2. VOLATILITY SCALING
+                if self.volatility_type == "yang_zhang" and self.yz_vol_panel is not None and date in self.yz_vol_panel.index:
+                    # --- YANG ZHANG METHOD ---
+                    today_yz = self.yz_vol_panel.loc[date].dropna()
+                    
+                    if len(today_yz) > 0:
+                        market_regime_vol = today_yz.median()
+                        if market_regime_vol > 0:
+                            vol_scalar = self.target_vol / market_regime_vol
+                            vol_scalar = min(self.max_vol_leverage, vol_scalar)
+                        else:
+                            vol_scalar = 1.0
+                    else:
+                        vol_scalar = 1.0
+
+                elif self.volatility_type == "ewma" and getattr(self, 'ewma_vol_panel', None) is not None and date in self.ewma_vol_panel.index:
+                    # --- NEW: EWMA METHOD ---
+                    today_ewma = self.ewma_vol_panel.loc[date].dropna()
+                    if len(today_ewma) > 0:
+                        market_regime_vol = today_ewma.median()
+                        if market_regime_vol > 0:
+                            vol_scalar = self.target_vol / market_regime_vol
+                            vol_scalar = min(self.max_vol_leverage, vol_scalar)
+                        else:
+                            vol_scalar = 1.0
+                    else:
+                        vol_scalar = 1.0
+
                 else:
-                    vol_scalar = 1.0
+                    # --- SIMPLE METHOD (Default) ---
+                    # Uses standard deviation of recent portfolio returns
+                    recent_rets = daily_rets[-self.vol_lookback:]
+                    realized_vol = np.std(recent_rets) * np.sqrt(252) if len(recent_rets) > 0 else 0.0
+                    
+                    if realized_vol > 0:
+                        vol_scalar = self.target_vol / realized_vol
+                        vol_scalar = min(self.max_vol_leverage, vol_scalar)
+                    else:
+                        vol_scalar = 1.0
                     
                 # 3. CONVICTION SCALING (Kelly Proxy: Rolling Hit Rate)
                 """
@@ -2227,6 +2319,87 @@ class HRPBacktest:
         print(f"IC Scaling Enabled: Lookback={ic_lookback}d, Target IC={ic_threshold}")
         print(f"Spread Scaling Enabled: Lookback={spread_lookback}d, Min Exposure Floor={spread_floor*100}%")
 
+    def plot_volatility(self, window=60):
+        """
+        Plots the chosen volatility metric of the strategy on the left Y-axis 
+        and the cumulative returns on the right twin Y-axis.
+        """
+        if not hasattr(self, "results"):
+            raise Exception("Run run() first.")
+
+        dr = self.results["return"]
+        dates = self.results.index
+
+        # 1. Calculate Cumulative Returns
+        cum_ret = np.cumprod(1 + dr)
+
+        # 2. Setup the Plot
+        fig, ax1 = plt.subplots(figsize=(12, 6))
+        color1 = 'tab:blue'
+        ax1.set_xlabel('Date')
+        
+        # =======================================================
+        # 3. DYNAMIC VOLATILITY DATA SELECTION
+        # =======================================================
+        if getattr(self, 'volatility_type', 'simple') == "yang_zhang" and getattr(self, 'yz_vol_panel', None) is not None:
+            # --- YANG ZHANG VOLATILITY ---
+            # The scaler uses the daily cross-sectional median. 
+            # Note: The YZ formula already natively calculated a 20-day rolling variance under the hood.
+            vol_series = self.yz_vol_panel.median(axis=1).reindex(dates).ffill()
+            
+            ax1.set_ylabel('Median Yang-Zhang Volatility (Annualized)', color=color1)
+            ax1.plot(dates, vol_series, color=color1, linewidth=1.5, alpha=0.8, label='YZ Volatility (20d Base)')
+            title_str = "Yang-Zhang Market Volatility vs. Cumulative Returns"
+            
+        elif getattr(self, 'volatility_type', 'simple') == "ewma" and getattr(self, 'ewma_vol_panel', None) is not None:
+            # --- NEW: EWMA PLOTTING ---
+            vol_series = self.ewma_vol_panel.median(axis=1).reindex(dates).ffill()
+            ax1.set_ylabel('Median EWMA Volatility (Annualized)', color=color1)
+            ax1.plot(dates, vol_series, color=color1, linewidth=1.5, alpha=0.8, label='EWMA Volatility (20d Span)')
+            title_str = "EWMA Market Volatility vs. Cumulative Returns"
+
+        else:
+            # --- SIMPLE VOLATILITY ---
+            # Rolling standard deviation of the portfolio's net returns
+            vol_series = dr.rolling(window=window).std() * np.sqrt(252)
+            
+            ax1.set_ylabel(f'Rolling {window}-Day Volatility (Annualized)', color=color1)
+            ax1.plot(dates, vol_series, color=color1, linewidth=1.5, alpha=0.8, label=f'Simple {window}d Volatility')
+            title_str = "Simple Portfolio Volatility vs. Cumulative Returns"
+
+        ax1.tick_params(axis='y', labelcolor=color1)
+        
+        # Optional: Draw a dashed line representing the target volatility (if dynamic scaling is on)
+        if hasattr(self, 'target_vol') and getattr(self, 'use_dynamic_scaling', False):
+            ax1.axhline(self.target_vol, color='gray', linestyle='--', linewidth=1.2, 
+                        label=f'Target Vol ({self.target_vol:.1%})')
+
+        # =======================================================
+        # 4. PLOT CUMULATIVE RETURNS ON TWIN AXIS
+        # =======================================================
+        ax2 = ax1.twinx()  
+        color2 = 'purple'
+        ax2.set_ylabel('Cumulative Return', color=color2)  
+        ax2.plot(dates, cum_ret, color=color2, linewidth=2, label='Cumulative Return')
+        ax2.tick_params(axis='y', labelcolor=color2)
+
+        # --- Formatting ---
+        plt.title(title_str, fontsize=14)
+        
+        # Combine legends from both axes into one box
+        lines_1, labels_1 = ax1.get_legend_handles_labels()
+        lines_2, labels_2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper left')
+
+        # Format left Y-axis as percentages
+        import matplotlib.ticker as mtick
+        ax1.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+
+        fig.tight_layout()  
+        plt.show()
+        return dates, vol_series
+        
+
 def optimize_hrp_strategy_old(portfolio, train_start, train_end, n_trials=50):
     """
     Optimizes HRPBacktest parameters over a specific In-Sample time period.
@@ -2348,8 +2521,8 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
         # ============================================================
         # STRUCTURAL PARAMETERS
         # ============================================================
-        n_pos             = trial.suggest_int("n_positions", 2, 30, step=2)
-        rebalance_days    = trial.suggest_int("rebalance_days", 1, 5)
+        n_pos             = trial.suggest_int("n_positions", 2, 10, step=1)
+        rebalance_days    = 1 #trial.suggest_int("rebalance_days", 1, 5)
         holding_period    = 5 #trial.suggest_int("holding_period", 1, 10)
         hrp_lookback      = trial.suggest_int("hrp_lookback", 30, 150, step=30)
         buffer_multiplier = trial.suggest_float("buffer_multiplier", 1.0, 3.0, step=0.2)
@@ -2365,12 +2538,12 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
         # ============================================================
         
         # Volatility scaling (always on - it's the baseline risk control)
-        target_vol        = trial.suggest_float("target_vol", 0.01, 0.20, step=0.01)
-        vol_lookback      = trial.suggest_int("vol_lookback", 10, 130, step=10)
+        target_vol        = 100#trial.suggest_float("target_vol", 0.05, 0.50, step=0.05)
+        vol_lookback      = 20#trial.suggest_int("vol_lookback", 5, 60, step=5)
         max_vol_leverage  = 1 #trial.suggest_float("max_vol_leverage", 1.0, 2.0, step=0.25)
         
         # Drawdown scaling (toggleable)
-        use_dd_scaling = trial.suggest_categorical("use_dd_scaling", [True, False])
+        use_dd_scaling = False #trial.suggest_categorical("use_dd_scaling", [True, False])
         if use_dd_scaling:
             dd_warning_threshold = trial.suggest_float("dd_warning_threshold", -0.4, -0.03, step=0.02)
             dd_kill_threshold    = trial.suggest_float("dd_kill_threshold", -0.50, -0.25, step=0.05)
@@ -2385,18 +2558,18 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
             dd_penalty           = 1.0
         
         # IC scaling (toggleable)
-        use_ic_scaling = trial.suggest_categorical("use_ic_scaling", [True, False])
+        use_ic_scaling = True #trial.suggest_categorical("use_ic_scaling", [True, False])
         if use_ic_scaling:
-            ic_lookback  = trial.suggest_int("ic_lookback", 10, 120, step=10)
-            ic_threshold = trial.suggest_float("ic_threshold", -0.05, 0.05, step=0.005)
+            ic_lookback  = trial.suggest_int("ic_lookback", 5, 60, step=5)
+            ic_threshold = trial.suggest_float("ic_threshold", 0.01, 0.4, step=0.01)
         else:
             ic_lookback  = 20
             ic_threshold = 0.02
         
         # Spread scaling (toggleable)
-        use_spread_scaling = trial.suggest_categorical("use_spread_scaling", [True, False])
+        use_spread_scaling = False #trial.suggest_categorical("use_spread_scaling", [True, False])
         if use_spread_scaling:
-            spread_lookback = trial.suggest_int("spread_lookback", 10, 120, step=10)
+            spread_lookback = trial.suggest_int("spread_lookback", 10, 60, step=5)
             spread_floor    = trial.suggest_float("spread_floor", 0.1, 0.7, step=0.1)
         else:
             spread_lookback = 30
@@ -2416,7 +2589,8 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
                 smooth_predictions=smooth_preds,
                 buffer_multiplier=buffer_multiplier,
                 sizing_method=sizing_method,
-                cost_bps=5.0
+                cost_bps=5.0,
+                volatility_type = "yang_zhang"
             )
             
             # Apply dynamic scaling configuration.
