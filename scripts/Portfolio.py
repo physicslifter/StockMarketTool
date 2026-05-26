@@ -2538,8 +2538,8 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
         # ============================================================
         
         # Volatility scaling (always on - it's the baseline risk control)
-        target_vol        = 100#trial.suggest_float("target_vol", 0.05, 0.50, step=0.05)
-        vol_lookback      = 20#trial.suggest_int("vol_lookback", 5, 60, step=5)
+        target_vol        = trial.suggest_float("target_vol", 0.03, 0.51, step=0.03)
+        vol_lookback      = trial.suggest_int("vol_lookback", 5, 60, step=5)
         max_vol_leverage  = 1 #trial.suggest_float("max_vol_leverage", 1.0, 2.0, step=0.25)
         
         # Drawdown scaling (toggleable)
@@ -2558,7 +2558,7 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
             dd_penalty           = 1.0
         
         # IC scaling (toggleable)
-        use_ic_scaling = True #trial.suggest_categorical("use_ic_scaling", [True, False])
+        use_ic_scaling = False #trial.suggest_categorical("use_ic_scaling", [True, False])
         if use_ic_scaling:
             ic_lookback  = trial.suggest_int("ic_lookback", 5, 60, step=5)
             ic_threshold = trial.suggest_float("ic_threshold", 0.01, 0.4, step=0.01)
@@ -2641,6 +2641,200 @@ def optimize_hrp_strategy(portfolio, train_start, train_end, n_trials=50):
     
     print("\nOptimization Complete!")
     print(f"Best Objective Score: {study.best_value:.4f}")
+    print("Best Parameters:")
+    for key, value in study.best_params.items():
+        print(f"  {key}: {value}")
+        
+    return study.best_params
+
+def optimize_hrp3(portfolio, train_start, train_end, n_trials=50, 
+                          objective_type="Sortino", objective_params=None):
+    """
+    Optimizes HRPBacktest parameters over a specific In-Sample time period.
+    Includes both structural parameters and dynamic scaling parameters.
+    
+    Args:
+        portfolio: The loaded Portfolio object.
+        train_start (str): Start date for In-Sample training (e.g., '2016-01-01').
+        train_end (str): End date for In-Sample training (e.g., '2020-12-31').
+        n_trials (int): Number of combinations to test.
+        objective_type (str): "Sortino" or "CAGR".
+        objective_params (dict): Constraints for the optimizer.
+            - If "Sortino": Must contain 'min_cagr' (e.g., {'min_cagr': 0.10})
+            - If "CAGR": Must contain 'max_dd' (e.g., {'max_dd': -0.25})
+            *Note: You can pass both keys simultaneously for maximum safety.
+        
+    Returns:
+        dict: The best parameter combination.
+    """
+    # ============================================================
+    # INPUT VALIDATION
+    # ============================================================
+    if objective_type not in ["Sortino", "CAGR"]:
+        raise ValueError(f"Invalid objective_type '{objective_type}'. Must be 'Sortino' or 'CAGR'.")
+        
+    if objective_params is None or not isinstance(objective_params, dict):
+        raise TypeError("objective_params must be a dictionary. e.g., {'min_cagr': 0.10, 'max_dd': -0.25}")
+        
+    if objective_type == "Sortino" and "min_cagr" not in objective_params:
+        raise ValueError("When optimizing for 'Sortino', objective_params must contain a 'min_cagr' limit.")
+        
+    if objective_type == "CAGR" and "max_dd" not in objective_params:
+        raise ValueError("When optimizing for 'CAGR', objective_params must contain a 'max_dd' limit.")
+
+    # Defensive formatting for max_dd (ensures it is negative)
+    if "max_dd" in objective_params:
+        objective_params["max_dd"] = -abs(objective_params["max_dd"])
+
+    print(f"--- Starting HRP Optimization ({train_start} to {train_end}) ---")
+    print(f"Objective: Maximize {objective_type} | Constraints: {objective_params}")
+    
+    # 1. Isolate the Training Data (In-Sample)
+    class SlicedPortfolio: pass
+    train_port = SlicedPortfolio()
+    train_port.has_data = True
+    
+    mask = (pd.to_datetime(portfolio.data['date']) >= pd.to_datetime(train_start)) & \
+           (pd.to_datetime(portfolio.data['date']) <= pd.to_datetime(train_end))
+    train_port.data = portfolio.data[mask].copy()
+
+    # 2. Define the Optuna Objective
+    def objective(trial):
+        # ============================================================
+        # STRUCTURAL PARAMETERS
+        # ============================================================
+        n_pos             = trial.suggest_int("n_positions", 2, 10, step=1)
+        rebalance_days    = 1 #trial.suggest_int("rebalance_days", 1, 5)
+        holding_period    = 5 #trial.suggest_int("holding_period", 1, 10)
+        hrp_lookback      = trial.suggest_int("hrp_lookback", 30, 150, step=30)
+        buffer_multiplier = trial.suggest_float("buffer_multiplier", 1.0, 3.0, step=0.2)
+        smooth_preds      = trial.suggest_categorical("smooth_predictions", [True, False])
+        sizing_method     = trial.suggest_categorical("sizing_method", ["dollar_neutral", "beta_neutral"])
+        
+        # ============================================================
+        # DYNAMIC SCALING PARAMETERS
+        # ============================================================
+        target_vol        = trial.suggest_float("target_vol", 0.03, 0.51, step=0.03)
+        vol_lookback      = trial.suggest_int("vol_lookback", 5, 60, step=5)
+        max_vol_leverage  = 1 #trial.suggest_float("max_vol_leverage", 1.0, 2.0, step=0.25)
+        
+        use_dd_scaling = False #trial.suggest_categorical("use_dd_scaling", [True, False])
+        if use_dd_scaling:
+            dd_warning_threshold = trial.suggest_float("dd_warning_threshold", -0.4, -0.03, step=0.02)
+            dd_kill_threshold    = trial.suggest_float("dd_kill_threshold", -0.50, -0.25, step=0.05)
+            dd_penalty           = trial.suggest_float("dd_penalty", 0.1, 0.75, step=0.15)
+            if dd_kill_threshold >= dd_warning_threshold:
+                return -999.0
+        else:
+            dd_warning_threshold = -0.99
+            dd_kill_threshold    = -0.999
+            dd_penalty           = 1.0
+        
+        use_ic_scaling = False #trial.suggest_categorical("use_ic_scaling", [True, False])
+        if use_ic_scaling:
+            ic_lookback  = trial.suggest_int("ic_lookback", 5, 60, step=5)
+            ic_threshold = trial.suggest_float("ic_threshold", 0.01, 0.4, step=0.01)
+        else:
+            ic_lookback  = 20
+            ic_threshold = 0.02
+        
+        use_spread_scaling = False #trial.suggest_categorical("use_spread_scaling", [True, False])
+        if use_spread_scaling:
+            spread_lookback = trial.suggest_int("spread_lookback", 10, 60, step=5)
+            spread_floor    = trial.suggest_float("spread_floor", 0.1, 0.7, step=0.1)
+        else:
+            spread_lookback = 30
+            spread_floor    = 0.3
+        
+        # ============================================================
+        # RUN THE BACKTEST
+        # ============================================================
+        try:
+            bt = HRPBacktest(
+                portfolio=train_port,
+                n_longs=n_pos,
+                n_shorts=n_pos,
+                holding_period=holding_period,
+                rebalance_days=rebalance_days,
+                hrp_lookback=hrp_lookback,
+                smooth_predictions=smooth_preds,
+                buffer_multiplier=buffer_multiplier,
+                sizing_method=sizing_method,
+                cost_bps=15,
+                volatility_type="yang_zhang"
+            )
+            
+            bt.set_scaling_params(
+                target_vol=target_vol,
+                vol_lookback=vol_lookback,
+                max_vol_leverage=max_vol_leverage,
+                dd_warning_threshold=dd_warning_threshold,
+                dd_penalty=dd_penalty,
+                dd_kill_threshold=dd_kill_threshold,
+                use_ic_scaling=use_ic_scaling,
+                ic_lookback=ic_lookback,
+                ic_threshold=ic_threshold,
+                use_spread_scaling=use_spread_scaling,
+                spread_lookback=spread_lookback,
+                spread_floor=spread_floor,
+            )
+            
+            res = bt.run(verbose=False)
+        except Exception as e:
+            return -999.0
+            
+        # ============================================================
+        # FITNESS SCORE & CONSTRAINTS
+        # ============================================================
+        dr = res['return'].values
+        if len(dr) < 50 or np.std(dr) == 0:
+            return -999.0
+            
+        cum = np.cumprod(1 + dr)
+        if cum[-1] <= 0:
+            return -999.0
+            
+        peak = np.maximum.accumulate(cum)
+        max_dd = ((cum - peak) / peak).min()  # This yields a negative number
+        
+        # Calculate Base Metrics
+        years = len(dr) / 252.0
+        cagr = (cum[-1] ** (1 / years)) - 1
+        
+        annualized_return = dr.mean() * 252
+        downside_returns = dr[dr < 0]
+        if len(downside_returns) > 0:
+            downside_dev = np.sqrt(np.mean(downside_returns**2)) * np.sqrt(252)
+        else:
+            downside_dev = 1e-8
+            
+        sortino = annualized_return / downside_dev
+        
+        # --- Apply Constraints based on Objective Type ---
+        
+        # Guardrail 1: Max Drawdown
+        if "max_dd" in objective_params:
+            if max_dd < objective_params["max_dd"]:
+                return -999.0  # Instant disqualification
+                
+        # Guardrail 2: Minimum CAGR
+        if "min_cagr" in objective_params:
+            if cagr < objective_params["min_cagr"]:
+                return -999.0  # Instant disqualification
+                
+        # --- Return Final Score ---
+        if objective_type == "Sortino":
+            return sortino
+        elif objective_type == "CAGR":
+            return cagr
+
+    # 3. Run the Optimizer
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=True)
+    
+    print("\nOptimization Complete!")
+    print(f"Best {objective_type} Score: {study.best_value:.4f}")
     print("Best Parameters:")
     for key, value in study.best_params.items():
         print(f"  {key}: {value}")
