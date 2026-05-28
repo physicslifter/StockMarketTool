@@ -1986,18 +1986,24 @@ class HRPBacktest:
                     current_longs = set(sym for t in self.tranches for sym, sh in t['shares'].items() if sh > 0)
                     current_shorts = set(sym for t in self.tranches for sym, sh in t['shares'].items() if sh < 0)
 
-                    df['rank_long'] = df["final_pred"].rank(ascending=False)
-                    df['rank_short'] = df["final_pred"].rank(ascending=True)
-                    
-                    kept_longs = df[(df['act_symbol'].isin(current_longs)) & (df['rank_long'] <= n_l * self.buffer_multiplier)]
-                    needed_longs = max(0, n_l - len(kept_longs))
-                    new_longs = df[~df['act_symbol'].isin(current_longs)].sort_values('rank_long').head(needed_longs)
-                    longs = pd.concat([kept_longs, new_longs])
+                    # --- EXPLICIT LONG/SHORT TOGGLES ---
+                    if n_l > 0:
+                        df['rank_long'] = df["final_pred"].rank(ascending=False)
+                        kept_longs = df[(df['act_symbol'].isin(current_longs)) & (df['rank_long'] <= n_l * self.buffer_multiplier)]
+                        needed_longs = max(0, n_l - len(kept_longs))
+                        new_longs = df[~df['act_symbol'].isin(current_longs)].sort_values('rank_long').head(needed_longs)
+                        longs = pd.concat([kept_longs, new_longs])
+                    else:
+                        longs = pd.DataFrame(columns=df.columns)
 
-                    kept_shorts = df[(df['act_symbol'].isin(current_shorts)) & (df['rank_short'] <= n_s * self.buffer_multiplier)]
-                    needed_shorts = max(0, n_s - len(kept_shorts))
-                    new_shorts = df[~df['act_symbol'].isin(current_shorts)].sort_values('rank_short').head(needed_shorts)
-                    shorts = pd.concat([kept_shorts, new_shorts])
+                    if n_s > 0:
+                        df['rank_short'] = df["final_pred"].rank(ascending=True)
+                        kept_shorts = df[(df['act_symbol'].isin(current_shorts)) & (df['rank_short'] <= n_s * self.buffer_multiplier)]
+                        needed_shorts = max(0, n_s - len(kept_shorts))
+                        new_shorts = df[~df['act_symbol'].isin(current_shorts)].sort_values('rank_short').head(needed_shorts)
+                        shorts = pd.concat([kept_shorts, new_shorts])
+                    else:
+                        shorts = pd.DataFrame(columns=df.columns)
 
                     # --- HRP WEIGHT CALCULATION ---
                     current_date_idx = self.returns_pivot.index.get_loc(date)
@@ -2223,7 +2229,7 @@ class HRPBacktest:
 
         axes[1, 2].plot(dates, self.hrp_stats["max_w_long"] * 100, color="blue", lw=1, alpha=0.8, label="Max Long Wt %")
         axes[1, 2].plot(dates, self.hrp_stats["max_w_short"] * 100, color="red", lw=1, alpha=0.8, label="Max Short Wt %")
-        axes[1, 2].axhline((1/self.n_longs)*100, color="gray", ls="--", lw=1, label="Eq. Wt Base %")
+        axes[1, 2].axhline((1/self.n_longs)*100 if self.n_longs > 0 else 0, color="gray", ls="--", lw=1, label="Eq. Wt Base %")
         axes[1, 2].set_title("HRP Concentration (Max Single Position %)")
         axes[1, 2].legend(loc="upper right")
 
