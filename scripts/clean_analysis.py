@@ -96,6 +96,14 @@ class Filter:
             List of valid tickers
         """
         raise NotImplementedError
+                
+    
+class MarketCapFilter:
+    def __init__(self):
+        super().__init__("market_cap")
+
+    def apply(self):
+        pass
 
 class TopLiquidityFilter(Filter):
     def __init__(self, N: int):
@@ -271,14 +279,18 @@ class SecurityTypeFilter(Filter):
     
 
 class Universe:
-    def __init__(self, master_df: pd.DataFrame, filter_etfs:bool = True):
+    def __init__(self, master_df: pd.DataFrame = None, filter_etfs:bool = True):
+        if type(master_df) == type(None):
+            self.master_df = df = pd.read_feather("../Data/all_ohlcv.feather")
         # We store the master copy. We never modify this directly.
-        self.master_df = master_df
+        else:
+            self.master_df = master_df
         self.filters = []
         if filter_etfs == True:
             etf_data = pd.read_feather("../Data/ETFs.feather")
             etf_list = set(etf_data['act_symbol'].unique())
             self.master_df = self.master_df[~self.master_df['act_symbol'].isin(etf_list)]
+        self.has_universe = False
 
     def add_filter(self, filter: Filter):
         if not isinstance(filter, Filter):
@@ -428,7 +440,27 @@ class Universe:
             else:
                 raise Exception("Extension invalid. Write code to save for this file type")
         self.universe_data = final_df
+        self.has_universe = True
         return final_df
+    
+    def save(self, folder):
+        '''
+        Saves universe to a folder so that it may be recreated later
+        '''
+        #save filters & information
+        os.makedirs(f"{folder}/filters")
+        for c, filter in enumerate(self.filters):
+            #pickle the filter
+            with open(f'{folder}/filters/{c}.pkl', 'wb') as f:
+                pickle.dump(filter, f, pickle.HIGHEST_PROTOCOL)
+            #save filter info
+        
+        #save universe file
+        if self.has_universe == True:
+            self.universe_data.to_feather(f"{folder}/universe.feather")
+
+        
+
 
 class Model:
     def __init__(self, universe_path, fund_data_path=None, model_folder=None):
