@@ -1,7 +1,7 @@
 # StockMarketTool
 Tool for analyzing stock data and backtesting strategies
 
-<img width="1105" height="593" alt="HorizontalInfrastructure drawio-2" src="https://github.com/user-attachments/assets/f9818c51-4d81-4daa-a528-c059b397580c" />
+<img width="1105" height="593" alt="HorizontalInfrastructure drawio-3" src="https://github.com/user-attachments/assets/6513fc8e-86c5-4fce-90d7-ffa75ed18c58" />
 
 ## 1. Setup the repository as a python package
 In the main folder, run:
